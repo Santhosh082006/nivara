@@ -1,0 +1,122 @@
+// Prisma Schema for Nivara - Civic Issue Clustering & Reporting Engine
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CITIZEN
+  AUTHORITY
+  ADMIN
+}
+
+enum IssueCategory {
+  POTHOLE
+  GARBAGE_DUMP
+  STREETLIGHT
+  WATER_LEAKAGE
+  OPEN_SEWAGE
+  FOOTPATH_OBSTRUCTION
+  OTHER
+}
+
+enum ClusterStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+}
+
+enum ComplaintStatus {
+  SUBMITTED
+  CLUSTERED
+  VERIFIED
+  RESOLVED
+}
+
+model User {
+  id           String      @id @default(uuid())
+  name         String
+  email        String      @unique
+  passwordHash String
+  role         Role        @default(CITIZEN)
+  phone        String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  complaints   Complaint[]
+  upvotes      Upvote[]
+
+  @@map("users")
+}
+
+model IssueCluster {
+  id            String        @id @default(uuid())
+  category      IssueCategory
+  centroidLat   Float
+  centroidLng   Float
+  reportCount   Int           @default(1)
+  upvotes       Int           @default(0)
+  status        ClusterStatus @default(OPEN)
+  priorityScore Float         @default(2.0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  memberships   ClusterMembership[]
+  upvoteRecords Upvote[]
+
+  @@index([category, status])
+  @@index([centroidLat, centroidLng])
+  @@map("issue_clusters")
+}
+
+model Complaint {
+  id          String          @id @default(uuid())
+  userId      String
+  category    IssueCategory
+  description String
+  imageUrl    String?
+  latitude    Float
+  longitude   Float
+  status      ComplaintStatus @default(CLUSTERED)
+  createdAt   DateTime        @default(now())
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  membership  ClusterMembership?
+
+  @@index([category])
+  @@index([latitude, longitude])
+  @@map("complaints")
+}
+
+model ClusterMembership {
+  id                 String       @id @default(uuid())
+  clusterId          String
+  complaintId        String       @unique
+  distanceToCentroid Float        // Distance in meters when joined
+  joinedAt           DateTime     @default(now())
+
+  cluster            IssueCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  complaint          Complaint    @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId])
+  @@map("cluster_memberships")
+}
+
+model Upvote {
+  id        String       @id @default(uuid())
+  userId    String
+  clusterId String
+  createdAt DateTime     @default(now())
+
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cluster   IssueCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, clusterId])
+  @@index([clusterId])
+  @@map("upvotes")
+}
