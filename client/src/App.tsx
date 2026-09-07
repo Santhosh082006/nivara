@@ -134,6 +134,12 @@ export function App() {
         onComplaintSubmitted={() => {
           loadClusters();
         }}
+        onViewClusterOnMap={(cluster) => {
+          setIsReportModalOpen(false);
+          setActiveView('map');
+          setSelectedClusterId(cluster.id);
+          setFocusedCoords([cluster.centroidLat, cluster.centroidLng]);
+        }}
       />
 
       <ClusterDetailModal

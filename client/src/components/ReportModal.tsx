@@ -12,30 +12,67 @@ import {
   Upload,
   Trash2,
   Link as LinkIcon,
+  Info,
+  Radar,
+  Eye,
 } from 'lucide-react';
-import { IssueCategory, NearbyClusterCheckResult } from '../types';
+import {
+  MapContainer,
+  TileLayer,
+  CircleMarker,
+  Circle,
+  useMap,
+  useMapEvents,
+} from 'react-leaflet';
+import { IssueCategory, IssueCluster, NearbyClusterCheckResult } from '../types';
 import { checkNearbyCluster, submitComplaintApi, upvoteClusterApi } from '../api';
 
 interface ReportModalProps {
   isOpen: boolean;
   onClose: () => void;
   onComplaintSubmitted: () => void;
+  onViewClusterOnMap?: (cluster: IssueCluster) => void;
 }
 
-const CATEGORIES: { value: IssueCategory; label: string; icon: string }[] = [
-  { value: 'POTHOLE', label: 'Pothole', icon: '🕳️' },
-  { value: 'GARBAGE_DUMP', label: 'Garbage Dump', icon: '🗑️' },
-  { value: 'STREETLIGHT', label: 'Streetlight', icon: '💡' },
-  { value: 'WATER_LEAKAGE', label: 'Water Leakage', icon: '🚰' },
-  { value: 'OPEN_SEWAGE', label: 'Open Sewage', icon: '⚠️' },
-  { value: 'FOOTPATH_OBSTRUCTION', label: 'Footpath Encroachment', icon: '🚶' },
-  { value: 'OTHER', label: 'Other Hazard', icon: '📌' },
+const CATEGORIES: { value: IssueCategory; label: string; icon: string; accent: string }[] = [
+  { value: 'POTHOLE', label: 'Pothole', icon: '🕳️', accent: 'hover:border-orange-400 hover:bg-orange-50/50' },
+  { value: 'GARBAGE_DUMP', label: 'Garbage Dump', icon: '🗑️', accent: 'hover:border-emerald-400 hover:bg-emerald-50/50' },
+  { value: 'STREETLIGHT', label: 'Streetlight', icon: '💡', accent: 'hover:border-amber-400 hover:bg-amber-50/50' },
+  { value: 'WATER_LEAKAGE', label: 'Water Leak', icon: '🚰', accent: 'hover:border-cyan-400 hover:bg-cyan-50/50' },
+  { value: 'OPEN_SEWAGE', label: 'Open Sewage', icon: '⚠️', accent: 'hover:border-red-400 hover:bg-red-50/50' },
+  { value: 'FOOTPATH_OBSTRUCTION', label: 'Footpath Block', icon: '🚶', accent: 'hover:border-violet-400 hover:bg-violet-50/50' },
+  { value: 'OTHER', label: 'Other Hazard', icon: '📌', accent: 'hover:border-slate-400 hover:bg-slate-50/50' },
 ];
+
+function MiniMapController({ center }: { center: [number, number] }) {
+  const map = useMap();
+  useEffect(() => {
+    map.flyTo(center, 16, { duration: 0.8 });
+  }, [center, map]);
+  return null;
+}
+
+function MiniMapClickHandler({
+  onLocationSelect,
+}: {
+  onLocationSelect: (lat: number, lng: number) => void;
+}) {
+  useMapEvents({
+    click(e) {
+      onLocationSelect(
+        Math.round(e.latlng.lat * 1e6) / 1e6,
+        Math.round(e.latlng.lng * 1e6) / 1e6
+      );
+    },
+  });
+  return null;
+}
 
 export const ReportModal: React.FC<ReportModalProps> = ({
   isOpen,
   onClose,
   onComplaintSubmitted,
+  onViewClusterOnMap,
 }) => {
   const [category, setCategory] = useState<IssueCategory>('POTHOLE');
   const [description, setDescription] = useState('');
@@ -44,6 +81,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
   const [fileName, setFileName] = useState<string>('');
   const [isProcessingPhoto, setIsProcessingPhoto] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [latitude, setLatitude] = useState<number>(12.935242);
   const [longitude, setLongitude] = useState<number>(77.624461);
   const [isLocating, setIsLocating] = useState(false);
@@ -61,6 +99,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
     }
 
     setIsLocating(true);
+    setErrorMessage(null);
     navigator.geolocation.getCurrentPosition(
       (position) => {
         setLatitude(Math.round(position.coords.latitude * 1e6) / 1e6);
@@ -69,7 +108,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
       },
       (err) => {
         console.warn('Geolocation error:', err);
-        setErrorMessage('Unable to retrieve your current location. Please enter coordinates manually.');
+        setErrorMessage('Unable to retrieve current location. You can click on the mini-map or enter coordinates manually.');
         setIsLocating(false);
       },
       { timeout: 10000, enableHighAccuracy: true }
@@ -220,90 +259,182 @@ export const ReportModal: React.FC<ReportModalProps> = ({
     }
   };
 
+  const isFormValid =
+    description.trim().length >= 5 &&
+    !isNaN(latitude) &&
+    !isNaN(longitude) &&
+    !isSubmitting &&
+    !isLocating;
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-          <div className="flex items-center space-x-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-sky-500"></span>
-            <h2 className="text-base font-bold text-slate-900">
-              Report Civic Hazard
-            </h2>
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/70 shrink-0">
+          <div className="flex items-center space-x-2.5">
+            <span className="w-3 h-3 rounded-full bg-sky-500 ring-4 ring-sky-100 animate-pulse"></span>
+            <div>
+              <h2 className="text-base font-extrabold text-slate-900">
+                Report Civic Hazard
+              </h2>
+              <p className="text-[11px] text-slate-500 font-medium">
+                Geospatial clustering with 50-meter deduplication
+              </p>
+            </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition"
+            className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Content */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        {/* Scrollable Content */}
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
           {errorMessage && (
-            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700 flex items-center space-x-2">
+            <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700 flex items-center space-x-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{errorMessage}</span>
             </div>
           )}
 
           {successMessage && (
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-700 flex items-center space-x-2">
+            <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-700 flex items-center space-x-2">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>{successMessage}</span>
             </div>
           )}
 
-          {/* Category Selector */}
+          {/* Category Selector with clean grid wrapping */}
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-              Issue Category
-            </label>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Issue Category
+              </label>
+              <span className="text-[11px] text-slate-400 font-medium">
+                Select defect type
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {CATEGORIES.map((cat) => (
                 <button
                   type="button"
                   key={cat.value}
                   onClick={() => setCategory(cat.value)}
-                  className={`flex items-center space-x-2 p-2.5 rounded-xl border text-xs font-semibold transition text-left ${
+                  className={`flex items-center space-x-2 p-2.5 rounded-2xl border text-xs font-semibold transition text-left ${
                     category === cat.value
-                      ? 'border-sky-500 bg-sky-50/50 text-sky-900 ring-1 ring-sky-500'
-                      : 'border-slate-200 hover:border-slate-300 text-slate-700 bg-white'
+                      ? 'border-sky-500 bg-sky-50/80 text-sky-950 ring-2 ring-sky-500/20 shadow-sm'
+                      : `border-slate-200 text-slate-700 bg-white ${cat.accent}`
                   }`}
                 >
-                  <span className="text-base">{cat.icon}</span>
-                  <span className="truncate">{cat.label}</span>
+                  <span className="text-lg shrink-0">{cat.icon}</span>
+                  <span className="truncate leading-tight">{cat.label}</span>
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Location Picker */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                Incident Location (GPS)
+          {/* Interactive Mini-Map Preview & Location Picker */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center space-x-1.5">
+                <MapPin className="w-3.5 h-3.5 text-sky-600" />
+                <span>Incident Location (GPS)</span>
               </label>
               <button
                 type="button"
                 onClick={handleDetectLocation}
                 disabled={isLocating}
-                className="flex items-center space-x-1 text-xs font-semibold text-sky-600 hover:text-sky-700 transition"
+                className="flex items-center space-x-1.5 text-xs font-bold text-sky-600 hover:text-sky-700 bg-sky-50 hover:bg-sky-100 px-2.5 py-1 rounded-xl transition active:scale-95 disabled:opacity-60"
               >
                 {isLocating ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Locating via GPS...</span>
+                  </>
                 ) : (
-                  <Navigation className="w-3.5 h-3.5" />
+                  <>
+                    <Navigation className="w-3.5 h-3.5" />
+                    <span>Use Current Location</span>
+                  </>
                 )}
-                <span>Use Current Location</span>
               </button>
             </div>
+
+            {/* Embedded Mini-Map */}
+            <div className="h-44 w-full rounded-2xl overflow-hidden border border-slate-200 shadow-inner relative z-0">
+              <MapContainer
+                center={[latitude, longitude]}
+                zoom={16}
+                scrollWheelZoom={false}
+                className="h-full w-full"
+                attributionControl={false}
+              >
+                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                <MiniMapController center={[latitude, longitude]} />
+                <MiniMapClickHandler
+                  onLocationSelect={(lat, lng) => {
+                    setLatitude(lat);
+                    setLongitude(lng);
+                  }}
+                />
+
+                {/* Current Report Pin (Blue) */}
+                <CircleMarker
+                  center={[latitude, longitude]}
+                  radius={8}
+                  pathOptions={{
+                    fillColor: '#0284c7',
+                    fillOpacity: 0.9,
+                    color: '#ffffff',
+                    weight: 2.5,
+                  }}
+                />
+
+                {/* Nearby Cluster Marker & 50m Radius Threshold (Amber) if detected */}
+                {nearbyCheck?.hasNearbyCluster && nearbyCheck.cluster && (
+                  <>
+                    {/* 50m Clustering Radius Boundary */}
+                    <Circle
+                      center={[nearbyCheck.cluster.centroidLat, nearbyCheck.cluster.centroidLng]}
+                      radius={50}
+                      pathOptions={{
+                        color: '#f59e0b',
+                        dashArray: '5, 5',
+                        fillColor: '#fef3c7',
+                        fillOpacity: 0.25,
+                        weight: 1.5,
+                      }}
+                    />
+                    {/* Nearby Cluster Centroid Pin */}
+                    <CircleMarker
+                      center={[nearbyCheck.cluster.centroidLat, nearbyCheck.cluster.centroidLng]}
+                      radius={10}
+                      pathOptions={{
+                        fillColor: '#d97706',
+                        fillOpacity: 0.95,
+                        color: '#ffffff',
+                        weight: 2.5,
+                      }}
+                    />
+                  </>
+                )}
+              </MapContainer>
+
+              {/* Map floating helper badge */}
+              <div className="absolute top-2 left-2 bg-slate-900/75 backdrop-blur-sm text-white px-2.5 py-1 rounded-lg text-[10px] font-semibold pointer-events-none flex items-center space-x-1.5 shadow-sm">
+                <span className="w-2 h-2 rounded-full bg-sky-400"></span>
+                <span>Click map to adjust pin position</span>
+              </div>
+            </div>
+
+            {/* Coordinate Number Boxes */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <span className="text-[10px] text-slate-400 font-medium">Latitude</span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Latitude</span>
                 <input
                   type="number"
                   step="any"
@@ -314,7 +445,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 />
               </div>
               <div>
-                <span className="text-[10px] text-slate-400 font-medium">Longitude</span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Longitude</span>
                 <input
                   type="number"
                   step="any"
@@ -325,50 +456,107 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 />
               </div>
             </div>
+
+            {/* Trust & Transparency explanation */}
+            <p className="text-[11px] text-slate-500 flex items-center space-x-1.5 pt-0.5">
+              <Info className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+              <span>We use high-precision GPS to automatically detect and merge duplicate reports within 50 meters.</span>
+            </p>
           </div>
 
-          {/* Day 13 Upvote-Instead-Of-Duplicate Intercept Banner */}
+          {/* Enhanced Duplicate-Detection Banner */}
           {nearbyCheck?.hasNearbyCluster && nearbyCheck.cluster && (
-            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 animate-in fade-in duration-200">
-              <div className="flex items-start space-x-3">
-                <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                <div className="flex-1 text-xs">
-                  <div className="font-bold text-amber-950 mb-0.5">
-                    Nearby Similar Issue Detected ({nearbyCheck.distanceMeters}m away)
+            <div className="p-4 rounded-3xl bg-gradient-to-br from-amber-50 to-orange-50/60 border border-amber-200/90 text-amber-900 shadow-sm animate-in fade-in slide-in-from-top-2 duration-300">
+              <div className="space-y-3">
+                {/* Header with Prominent Proximity Badge */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <span className="p-1 rounded-lg bg-amber-200/80 text-amber-800">
+                      <Radar className="w-4 h-4 animate-pulse text-amber-700" />
+                    </span>
+                    <span className="font-extrabold text-xs text-amber-950">
+                      Nearby Similar Issue Detected
+                    </span>
                   </div>
-                  <p className="text-amber-800 mb-2.5 leading-relaxed">
-                    Neighbors have already submitted{' '}
-                    <strong>{nearbyCheck.cluster.reportCount} reports</strong> for this{' '}
-                    {category.toLowerCase().replace('_', ' ')} with{' '}
-                    <strong>{nearbyCheck.cluster.upvotes} upvotes</strong>.
-                  </p>
+
+                  {/* Prominent Distance Tag */}
+                  <div className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full bg-amber-200/90 text-amber-950 font-black text-xs tracking-tight shadow-sm border border-amber-300">
+                    <span>📍</span>
+                    <span>{nearbyCheck.distanceMeters}m AWAY</span>
+                  </div>
+                </div>
+
+                {/* Explanation */}
+                <p className="text-xs text-amber-800 leading-relaxed">
+                  Neighbors have already submitted{' '}
+                  <strong className="text-amber-950">{nearbyCheck.cluster.reportCount} reports</strong> for this{' '}
+                  <span className="font-semibold">{category.toLowerCase().replace('_', ' ')}</span> with{' '}
+                  <strong className="text-amber-950">{nearbyCheck.cluster.upvotes} community upvotes</strong>.
+                </p>
+
+                {/* Actions inside Banner */}
+                <div className="space-y-2 pt-1">
                   <button
                     type="button"
                     onClick={handleUpvoteInstead}
                     disabled={isSubmitting}
-                    className="w-full flex items-center justify-center space-x-2 py-2 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold shadow-sm transition active:scale-95"
+                    className="w-full flex items-center justify-center space-x-2 py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl font-bold text-xs shadow-md shadow-amber-600/20 transition active:scale-95 disabled:opacity-50"
                   >
                     <ThumbsUp className="w-4 h-4" />
-                    <span>Upvote Existing Issue Instead (Recommended)</span>
+                    <span>Upvote Existing Issue Instead (+1 Priority)</span>
                   </button>
+
+                  <div className="flex items-center justify-between pt-0.5">
+                    <p className="text-[10px] text-amber-700 font-medium">
+                      ⚡ This will boost priority without creating a duplicate ticket.
+                    </p>
+
+                    {onViewClusterOnMap && (
+                      <button
+                        type="button"
+                        onClick={() => onViewClusterOnMap(nearbyCheck.cluster!)}
+                        className="text-[11px] font-bold text-amber-900 hover:text-amber-950 hover:underline flex items-center space-x-1 shrink-0 ml-2"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>View on map</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Description */}
+          {/* Description with Character Counter */}
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-              Issue Description
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                Issue Description
+              </label>
+              <span
+                className={`text-[11px] font-mono font-medium ${
+                  description.length >= 450
+                    ? 'text-red-500 font-bold'
+                    : 'text-slate-400'
+                }`}
+              >
+                {description.length} / 500
+              </span>
+            </div>
             <textarea
               rows={3}
+              maxLength={500}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Provide details (e.g. depth of crater, water line burst, broken pole)..."
+              placeholder="Provide specific details (e.g. depth of crater, water line burst, broken pole, danger to two-wheelers)..."
               required
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 resize-none"
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 resize-none transition"
             />
+            {description.trim().length > 0 && description.trim().length < 5 && (
+              <p className="text-[10px] text-amber-600 font-medium mt-1">
+                Please enter at least 5 characters to describe the issue.
+              </p>
+            )}
           </div>
 
           {/* Photo Evidence (Device Upload or URL) */}
@@ -377,11 +565,11 @@ export const ReportModal: React.FC<ReportModalProps> = ({
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
                 Photo Evidence (Optional)
               </label>
-              <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded-lg text-[11px] font-semibold">
+              <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded-xl text-[11px] font-semibold">
                 <button
                   type="button"
                   onClick={() => setPhotoMode('file')}
-                  className={`px-2 py-0.5 rounded-md transition ${
+                  className={`px-2.5 py-1 rounded-lg transition ${
                     photoMode === 'file'
                       ? 'bg-white text-slate-900 shadow-sm'
                       : 'text-slate-500 hover:text-slate-700'
@@ -392,7 +580,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setPhotoMode('url')}
-                  className={`px-2 py-0.5 rounded-md transition ${
+                  className={`px-2.5 py-1 rounded-lg transition ${
                     photoMode === 'url'
                       ? 'bg-white text-slate-900 shadow-sm'
                       : 'text-slate-500 hover:text-slate-700'
@@ -414,7 +602,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 />
 
                 {imageUrl ? (
-                  <div className="relative p-2.5 rounded-2xl bg-slate-50 border border-slate-200 flex items-center space-x-3">
+                  <div className="relative p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center space-x-3">
                     <img
                       src={imageUrl}
                       alt="Uploaded preview"
@@ -424,15 +612,15 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                       <p className="text-xs font-bold text-slate-800 truncate">
                         {fileName || 'Selected photo'}
                       </p>
-                      <p className="text-[10px] text-emerald-600 font-semibold flex items-center space-x-1 mt-0.5">
-                        <CheckCircle2 className="w-3 h-3" />
+                      <p className="text-[11px] text-emerald-600 font-semibold flex items-center space-x-1 mt-0.5">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
                         <span>Ready to upload</span>
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={handleRemovePhoto}
-                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition"
+                      className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition"
                       title="Remove photo"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -446,18 +634,18 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                     {isProcessingPhoto ? (
                       <div className="flex items-center justify-center space-x-2 py-1 text-xs text-slate-500">
                         <Loader2 className="w-4 h-4 animate-spin text-sky-500" />
-                        <span>Optimizing image from device...</span>
+                        <span>Optimizing photo from device...</span>
                       </div>
                     ) : (
                       <div className="flex flex-col items-center justify-center space-y-1 text-slate-500">
-                        <div className="w-9 h-9 rounded-full bg-slate-100 group-hover:bg-sky-100 group-hover:text-sky-600 flex items-center justify-center transition">
+                        <div className="w-10 h-10 rounded-full bg-slate-100 group-hover:bg-sky-100 group-hover:text-sky-600 flex items-center justify-center transition">
                           <Upload className="w-4 h-4" />
                         </div>
-                        <span className="text-xs font-semibold text-slate-700">
+                        <span className="text-xs font-bold text-slate-700">
                           Click to select photo from device or camera
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          JPG, PNG, WEBP (automatically optimized)
+                          JPG, PNG, WEBP (automatically resized & compressed)
                         </span>
                       </div>
                     )}
@@ -503,26 +691,28 @@ export const ReportModal: React.FC<ReportModalProps> = ({
             )}
           </div>
 
-          {/* Actions */}
-          <div className="pt-2 flex items-center space-x-3">
+          {/* Action Buttons */}
+          <div className="pt-2 flex items-center space-x-3 shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl transition"
+              className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-2xl transition"
             >
               Cancel
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
-              className="flex-1 flex items-center justify-center space-x-2 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-md shadow-sky-600/20 transition active:scale-95 disabled:opacity-50"
+              disabled={!isFormValid}
+              className="flex-1 flex items-center justify-center space-x-2 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-2xl shadow-md shadow-sky-600/20 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
                 <Send className="w-4 h-4" />
               )}
-              <span>{nearbyCheck?.hasNearbyCluster ? 'Submit & Merge' : 'Submit Report'}</span>
+              <span>
+                {nearbyCheck?.hasNearbyCluster ? 'Submit & Merge (+1 Report)' : 'Submit Report'}
+              </span>
             </button>
           </div>
         </form>
@@ -530,3 +720,5 @@ export const ReportModal: React.FC<ReportModalProps> = ({
     </div>
   );
 };
+
+export default ReportModal;
