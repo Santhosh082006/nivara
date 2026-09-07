@@ -212,18 +212,29 @@ export const ClusterDetailModal: React.FC<ClusterDetailModalProps> = ({
                       {membership.complaint.description}
                     </p>
 
+                    {membership.complaint.imageUrl && (
+                      <div className="pl-7 pt-1">
+                        <img
+                          src={membership.complaint.imageUrl}
+                          alt="Evidence photo"
+                          className="max-h-36 max-w-xs rounded-xl object-cover border border-slate-200 shadow-sm hover:ring-2 hover:ring-sky-400 transition cursor-pointer"
+                          onClick={() => {
+                            if (membership.complaint.imageUrl) {
+                              window.open(membership.complaint.imageUrl, '_blank');
+                            }
+                          }}
+                          title="Click to view original photo"
+                        />
+                      </div>
+                    )}
+
                     <div className="pl-7 flex items-center space-x-3 text-[10px] text-slate-400">
                       <span>Distance to Centroid: {membership.distanceToCentroid.toFixed(1)}m</span>
                       {membership.complaint.imageUrl && (
-                        <a
-                          href={membership.complaint.imageUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-sky-600 hover:underline flex items-center space-x-1"
-                        >
+                        <span className="text-sky-600 flex items-center space-x-1">
                           <ImageIcon className="w-3 h-3" />
-                          <span>View Photo</span>
-                        </a>
+                          <span>Photo Attached</span>
+                        </span>
                       )}
                     </div>
                   </div>
