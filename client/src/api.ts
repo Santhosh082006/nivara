@@ -84,6 +84,49 @@ export async function getCurrentUser(): Promise<{
   return request('/auth/me');
 }
 
+export async function requestPasswordReset(identifier: string): Promise<{
+  success: boolean;
+  message: string;
+  data: {
+    destinationType: 'email' | 'phone';
+    maskedDestination: string;
+    devOtpHint?: string;
+  };
+}> {
+  return request('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ identifier }),
+  });
+}
+
+export async function verifyResetOtp(
+  identifier: string,
+  otp: string
+): Promise<{
+  success: boolean;
+  message: string;
+  data: { resetToken: string };
+}> {
+  return request('/auth/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify({ identifier, otp }),
+  });
+}
+
+export async function resetPassword(
+  resetToken: string,
+  newPassword: string,
+  confirmPassword?: string
+): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  return request('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ resetToken, newPassword, confirmPassword }),
+  });
+}
+
 // Clusters API
 export async function fetchClusters(params?: {
   bounds?: string;
