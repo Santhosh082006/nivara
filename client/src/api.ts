@@ -67,6 +67,85 @@ export async function registerUser(payload: {
   });
 }
 
+// Dual OTP Signup Verification API
+export async function startSignup(payload: {
+  name: string;
+  email: string;
+  phone: string;
+  password: string;
+  role: string;
+}): Promise<{
+  success: boolean;
+  message: string;
+  data: {
+    sessionId: string;
+    maskedEmail: string;
+    maskedPhone: string;
+    devOtpHints?: {
+      emailOtp: string;
+      phoneOtp: string;
+    };
+  };
+}> {
+  return request('/auth/signup/start', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function verifySignupOtp(payload: {
+  sessionId: string;
+  type: 'email' | 'phone';
+  otp: string;
+}): Promise<{
+  success: boolean;
+  message: string;
+  data: {
+    isEmailVerified: boolean;
+    isPhoneVerified: boolean;
+    bothVerified: boolean;
+  };
+}> {
+  return request('/auth/signup/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function resendSignupOtp(payload: {
+  sessionId: string;
+  type: 'email' | 'phone';
+}): Promise<{
+  success: boolean;
+  message: string;
+  data: {
+    devOtpHint?: string;
+  };
+}> {
+  return request('/auth/signup/resend-otp', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function completeSignup(payload: {
+  sessionId: string;
+  name: string;
+  password: string;
+  role: string;
+}): Promise<{
+  success: boolean;
+  message: string;
+  data: {
+    user: User;
+  };
+}> {
+  return request('/auth/signup/complete', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function loginUser(payload: {
   email: string;
   password: string;

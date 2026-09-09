@@ -58,6 +58,28 @@ model User {
   @@map("users")
 }
 
+model PendingRegistration {
+  id                String   @id @default(uuid())
+  email             String
+  phone             String
+  emailOtpHash      String
+  phoneOtpHash      String
+  emailOtpExpiresAt DateTime
+  phoneOtpExpiresAt DateTime
+  isEmailVerified   Boolean  @default(false)
+  isPhoneVerified   Boolean  @default(false)
+  emailLastSentAt   DateTime @default(now())
+  phoneLastSentAt   DateTime @default(now())
+  emailAttempts     Int      @default(0)
+  phoneAttempts     Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([email])
+  @@index([phone])
+  @@map("pending_registrations")
+}
+
 model IssueCluster {
   id            String        @id @default(uuid())
   category      IssueCategory
