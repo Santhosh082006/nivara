@@ -10,11 +10,9 @@ import {
 import {
   IssueCategory,
   IssueCluster,
-  ClusterStatus,
 } from '../types';
 import {
   ThumbsUp,
-  AlertTriangle,
   Clock,
   ExternalLink,
   Filter,
@@ -22,7 +20,6 @@ import {
   MapPin,
   Loader2,
   X,
-  Layers,
 } from 'lucide-react';
 
 interface CivicMapViewProps {
@@ -78,7 +75,7 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
   centerCoords,
 }) => {
   const [viewportBounds, setViewportBounds] = useState<string>('');
-  const [mapType, setMapType] = useState<'satellite' | 'streets'>('satellite');
+  const [mapType, setMapType] = useState<'gmaps' | 'satellite'>('gmaps');
 
   // Search state
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -137,7 +134,7 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
 
   const getMarkerColor = (cluster: IssueCluster): string => {
     if (cluster.status === 'RESOLVED') return '#64748b'; // Gray
-    if (cluster.reportCount >= 6) return '#dc2626'; // High alert Red
+    if (cluster.reportCount >= 6) return '#EA4335'; // Google Red alert
     return CATEGORY_COLORS[cluster.category] || '#0284c7';
   };
 
@@ -210,46 +207,46 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
         </div>
       </div>
 
-      {/* Floating Top-Right Controls: Location Search & Map Layer Switcher */}
+      {/* Floating Top-Right Controls: Location Search & Google Maps Layer Switcher */}
       <div className="absolute top-4 right-4 z-[400] flex flex-col items-end space-y-2">
-        {/* Layer Switcher Button Group */}
+        {/* Google Maps Style Switcher */}
         <div className="bg-white/95 backdrop-blur-md rounded-2xl p-1 shadow-lg border border-slate-200 flex items-center space-x-1 text-xs font-bold">
+          <button
+            type="button"
+            onClick={() => setMapType('gmaps')}
+            className={`px-3 py-1.5 rounded-xl transition flex items-center space-x-1.5 ${
+              mapType === 'gmaps'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <span>🗺️</span>
+            <span>Google Map</span>
+          </button>
           <button
             type="button"
             onClick={() => setMapType('satellite')}
             className={`px-3 py-1.5 rounded-xl transition flex items-center space-x-1.5 ${
               mapType === 'satellite'
-                ? 'bg-sky-600 text-white shadow-sm'
+                ? 'bg-slate-900 text-white shadow-sm'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
             <span>🛰️</span>
             <span>Satellite</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setMapType('streets')}
-            className={`px-3 py-1.5 rounded-xl transition flex items-center space-x-1.5 ${
-              mapType === 'streets'
-                ? 'bg-sky-600 text-white shadow-sm'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-            }`}
-          >
-            <span>🗺️</span>
-            <span>Streets</span>
-          </button>
         </div>
 
-        {/* Location Search Box */}
+        {/* Google-Style Location Search Box */}
         <div className="relative w-72 sm:w-80">
-          <div className="flex items-center space-x-2 bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl px-3 py-2 shadow-lg focus-within:ring-2 focus-within:ring-sky-500 transition">
+          <div className="flex items-center space-x-2 bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl px-3.5 py-2 shadow-lg focus-within:ring-2 focus-within:ring-sky-500 transition">
             <Search className="w-4 h-4 text-slate-400 shrink-0" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search area, landmark, or city..."
-              className="w-full bg-transparent text-xs text-slate-800 placeholder-slate-400 focus:outline-none"
+              className="w-full bg-transparent text-xs text-slate-800 placeholder-slate-400 focus:outline-none font-medium"
             />
             {isSearching && <Loader2 className="w-4 h-4 animate-spin text-sky-500 shrink-0" />}
             {searchQuery && (
@@ -276,7 +273,7 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
                   onClick={() => handleSelectSearchResult(item)}
                   className="w-full text-left px-3.5 py-2 hover:bg-sky-50 text-xs text-slate-700 flex items-start space-x-2.5 transition border-b border-slate-50 last:border-0"
                 >
-                  <MapPin className="w-3.5 h-3.5 text-sky-500 shrink-0 mt-0.5" />
+                  <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
                   <span className="leading-relaxed line-clamp-2">{item.display_name}</span>
                 </button>
               ))}
@@ -306,32 +303,27 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
         </div>
       </div>
 
-      {/* Leaflet Map Canvas */}
+      {/* Google Maps Canvas */}
       <MapContainer
         center={[12.95, 77.63]} // Default Bangalore urban bounding center
         zoom={12}
         className="w-full h-full z-0"
         scrollWheelZoom={true}
       >
-        {/* Photorealistic High-Res Satellite vs Modern Realistic Streets */}
-        {mapType === 'satellite' ? (
-          <>
-            <TileLayer
-              attribution='Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
-              url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-              maxZoom={19}
-            />
-            {/* Hybrid Street & Place Names Overlay on Satellite */}
-            <TileLayer
-              url="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
-              maxZoom={19}
-            />
-          </>
+        {/* Official Google Maps Tiles: Standard Roadmap vs Satellite Hybrid */}
+        {mapType === 'gmaps' ? (
+          <TileLayer
+            url="https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}"
+            subdomains={['mt0', 'mt1', 'mt2', 'mt3']}
+            maxZoom={20}
+            attribution="&copy; Google Maps"
+          />
         ) : (
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-            maxZoom={19}
+            url="https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
+            subdomains={['mt0', 'mt1', 'mt2', 'mt3']}
+            maxZoom={20}
+            attribution="&copy; Google Maps"
           />
         )}
 
@@ -352,8 +344,8 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
               pathOptions={{
                 color: '#ffffff',
                 fillColor: color,
-                fillOpacity: isHighPriority ? 0.9 : 0.75,
-                weight: 2,
+                fillOpacity: isHighPriority ? 0.92 : 0.8,
+                weight: 2.5,
               }}
             >
               <Popup className="custom-leaflet-popup">
