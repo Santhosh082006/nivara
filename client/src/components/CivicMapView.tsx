@@ -18,6 +18,11 @@ import {
   Clock,
   ExternalLink,
   Filter,
+  Search,
+  MapPin,
+  Loader2,
+  X,
+  Layers,
 } from 'lucide-react';
 
 interface CivicMapViewProps {
@@ -73,6 +78,54 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
   centerCoords,
 }) => {
   const [viewportBounds, setViewportBounds] = useState<string>('');
+  const [mapType, setMapType] = useState<'satellite' | 'streets'>('satellite');
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchResults, setSearchResults] = useState<{ place_id: number; display_name: string; lat: string; lon: string }[]>([]);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+  const [activeCenter, setActiveCenter] = useState<[number, number] | undefined>(centerCoords);
+
+  useEffect(() => {
+    if (centerCoords) {
+      setActiveCenter(centerCoords);
+    }
+  }, [centerCoords]);
+
+  // Debounced address search using OpenStreetMap Nominatim
+  useEffect(() => {
+    if (!searchQuery.trim() || searchQuery.trim().length < 3) {
+      setSearchResults([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        setIsSearching(true);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+            searchQuery.trim()
+          )}&limit=5`
+        );
+        const data = await res.json();
+        setSearchResults(data || []);
+      } catch (err) {
+        console.warn('Geocoding search error:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const handleSelectSearchResult = (item: { display_name: string; lat: string; lon: string }) => {
+    const lat = parseFloat(item.lat);
+    const lon = parseFloat(item.lon);
+    setActiveCenter([lat, lon]);
+    setSearchQuery(item.display_name.split(',')[0]);
+    setSearchResults([]);
+  };
 
   // Sizing circles according to report count
   const getMarkerRadius = (count: number): number => {
@@ -157,6 +210,81 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
         </div>
       </div>
 
+      {/* Floating Top-Right Controls: Location Search & Map Layer Switcher */}
+      <div className="absolute top-4 right-4 z-[400] flex flex-col items-end space-y-2">
+        {/* Layer Switcher Button Group */}
+        <div className="bg-white/95 backdrop-blur-md rounded-2xl p-1 shadow-lg border border-slate-200 flex items-center space-x-1 text-xs font-bold">
+          <button
+            type="button"
+            onClick={() => setMapType('satellite')}
+            className={`px-3 py-1.5 rounded-xl transition flex items-center space-x-1.5 ${
+              mapType === 'satellite'
+                ? 'bg-sky-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <span>🛰️</span>
+            <span>Satellite</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMapType('streets')}
+            className={`px-3 py-1.5 rounded-xl transition flex items-center space-x-1.5 ${
+              mapType === 'streets'
+                ? 'bg-sky-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <span>🗺️</span>
+            <span>Streets</span>
+          </button>
+        </div>
+
+        {/* Location Search Box */}
+        <div className="relative w-72 sm:w-80">
+          <div className="flex items-center space-x-2 bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl px-3 py-2 shadow-lg focus-within:ring-2 focus-within:ring-sky-500 transition">
+            <Search className="w-4 h-4 text-slate-400 shrink-0" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search area, landmark, or city..."
+              className="w-full bg-transparent text-xs text-slate-800 placeholder-slate-400 focus:outline-none"
+            />
+            {isSearching && <Loader2 className="w-4 h-4 animate-spin text-sky-500 shrink-0" />}
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setSearchResults([]);
+                }}
+                className="text-slate-400 hover:text-slate-600 p-0.5"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Search Results Dropdown */}
+          {searchResults.length > 0 && (
+            <div className="absolute top-full right-0 mt-1.5 w-full bg-white rounded-2xl shadow-xl border border-slate-200 py-1.5 z-[500] max-h-56 overflow-y-auto animate-in fade-in slide-in-from-top-1">
+              {searchResults.map((item) => (
+                <button
+                  key={item.place_id}
+                  type="button"
+                  onClick={() => handleSelectSearchResult(item)}
+                  className="w-full text-left px-3.5 py-2 hover:bg-sky-50 text-xs text-slate-700 flex items-start space-x-2.5 transition border-b border-slate-50 last:border-0"
+                >
+                  <MapPin className="w-3.5 h-3.5 text-sky-500 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed line-clamp-2">{item.display_name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Legend Overlay */}
       <div className="absolute bottom-6 left-4 z-[400] bg-white/95 backdrop-blur-md rounded-xl shadow-md border border-slate-200 p-2.5 text-xs text-slate-700 hidden sm:block">
         <div className="font-bold text-[11px] uppercase tracking-wider text-slate-500 mb-1.5">
@@ -185,13 +313,30 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
         className="w-full h-full z-0"
         scrollWheelZoom={true}
       >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
+        {/* Photorealistic High-Res Satellite vs Modern Realistic Streets */}
+        {mapType === 'satellite' ? (
+          <>
+            <TileLayer
+              attribution='Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+              url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+              maxZoom={19}
+            />
+            {/* Hybrid Street & Place Names Overlay on Satellite */}
+            <TileLayer
+              url="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+              maxZoom={19}
+            />
+          </>
+        ) : (
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+            maxZoom={19}
+          />
+        )}
 
         <MapViewBoundsController onBoundsChange={setViewportBounds} />
-        <FlyToCluster coords={centerCoords} />
+        <FlyToCluster coords={activeCenter} />
 
         {/* Dynamic Clustered Pins */}
         {clusters.map((cluster) => {
@@ -205,10 +350,10 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
               center={[cluster.centroidLat, cluster.centroidLng]}
               radius={radius}
               pathOptions={{
-                color: color,
+                color: '#ffffff',
                 fillColor: color,
-                fillOpacity: isHighPriority ? 0.85 : 0.65,
-                weight: isHighPriority ? 3 : 2,
+                fillOpacity: isHighPriority ? 0.9 : 0.75,
+                weight: 2,
               }}
             >
               <Popup className="custom-leaflet-popup">
@@ -218,61 +363,45 @@ export const CivicMapView: React.FC<CivicMapViewProps> = ({
                       {formatCategoryName(cluster.category)}
                     </span>
                     <span
-                      className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
                         cluster.status === 'OPEN'
                           ? 'bg-amber-100 text-amber-800'
                           : cluster.status === 'IN_PROGRESS'
                           ? 'bg-blue-100 text-blue-800'
-                          : 'bg-slate-100 text-slate-700'
+                          : 'bg-emerald-100 text-emerald-800'
                       }`}
                     >
                       {cluster.status}
                     </span>
                   </div>
 
-                  <div className="my-2 p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-around text-center">
-                    <div>
-                      <div className="text-lg font-extrabold text-slate-900 leading-none">
-                        {cluster.reportCount}
-                      </div>
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        Reports
-                      </div>
+                  <div className="space-y-1 mb-2.5">
+                    <div className="text-xs font-bold text-slate-800">
+                      {cluster.reportCount} Aggregated Reports
                     </div>
-                    <div className="h-6 w-px bg-slate-200"></div>
-                    <div>
-                      <div className="text-lg font-extrabold text-sky-600 leading-none">
-                        {cluster.upvotes}
-                      </div>
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        Upvotes
-                      </div>
+                    <div className="text-[11px] text-slate-500 flex items-center space-x-1">
+                      <Clock className="w-3 h-3 text-slate-400" />
+                      <span>Updated {new Date(cluster.updatedAt).toLocaleDateString()}</span>
                     </div>
-                    <div className="h-6 w-px bg-slate-200"></div>
-                    <div>
-                      <div className="text-lg font-extrabold text-amber-600 leading-none">
-                        {cluster.priorityScore.toFixed(0)}
-                      </div>
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        Priority
-                      </div>
+                    <div className="text-[11px] font-semibold text-amber-600">
+                      Priority Score: {cluster.priorityScore.toFixed(1)}
                     </div>
                   </div>
 
-                  <div className="flex items-center space-x-2 mt-2">
+                  <div className="flex items-center space-x-2 pt-1 border-t border-slate-100">
                     <button
                       onClick={() => onUpvoteCluster(cluster.id)}
-                      className="flex-1 flex items-center justify-center space-x-1 py-1.5 px-2 bg-sky-50 hover:bg-sky-100 text-sky-700 rounded-lg text-xs font-semibold transition"
+                      className="flex-1 flex items-center justify-center space-x-1 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold rounded-lg transition"
                     >
-                      <ThumbsUp className="w-3.5 h-3.5" />
-                      <span>Upvote</span>
+                      <ThumbsUp className="w-3 h-3" />
+                      <span>Upvote ({cluster.upvotes})</span>
                     </button>
                     <button
                       onClick={() => onSelectCluster(cluster)}
-                      className="flex-1 flex items-center justify-center space-x-1 py-1.5 px-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold transition"
+                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
+                      title="Inspect Cluster History"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Details</span>
                     </button>
                   </div>
                 </div>

@@ -15,6 +15,8 @@ import {
   Info,
   Radar,
   Eye,
+  Search,
+  Layers,
 } from 'lucide-react';
 import {
   MapContainer,
@@ -84,12 +86,55 @@ export const ReportModal: React.FC<ReportModalProps> = ({
 
   const [latitude, setLatitude] = useState<number>(12.935242);
   const [longitude, setLongitude] = useState<number>(77.624461);
+  const [mapType, setMapType] = useState<'satellite' | 'streets'>('satellite');
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchResults, setSearchResults] = useState<{ place_id: number; display_name: string; lat: string; lon: string }[]>([]);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+
   const [isLocating, setIsLocating] = useState(false);
   const [isCheckingNearby, setIsCheckingNearby] = useState(false);
   const [nearbyCheck, setNearbyCheck] = useState<NearbyClusterCheckResult | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Debounced address search using OpenStreetMap Nominatim
+  useEffect(() => {
+    if (!searchQuery.trim() || searchQuery.trim().length < 3) {
+      setSearchResults([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        setIsSearching(true);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+            searchQuery.trim()
+          )}&limit=5`
+        );
+        const data = await res.json();
+        setSearchResults(data || []);
+      } catch (err) {
+        console.warn('Geocoding search error:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const handleSelectSearchResult = (item: { display_name: string; lat: string; lon: string }) => {
+    const lat = Math.round(parseFloat(item.lat) * 1e6) / 1e6;
+    const lon = Math.round(parseFloat(item.lon) * 1e6) / 1e6;
+    setLatitude(lat);
+    setLongitude(lon);
+    setSearchQuery(item.display_name.split(',')[0]);
+    setSearchResults([]);
+  };
 
   // Auto-detect browser GPS location
   const handleDetectLocation = () => {
@@ -108,7 +153,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
       },
       (err) => {
         console.warn('Geolocation error:', err);
-        setErrorMessage('Unable to retrieve current location. You can click on the mini-map or enter coordinates manually.');
+        setErrorMessage('Unable to retrieve current location. Use search or click on the mini-map to position your pin.');
         setIsLocating(false);
       },
       { timeout: 10000, enableHighAccuracy: true }
@@ -269,10 +314,10 @@ export const ReportModal: React.FC<ReportModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-xl max-h-[94vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/70 shrink-0">
+        <div className="px-6 py-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/80 shrink-0">
           <div className="flex items-center space-x-2.5">
             <span className="w-3 h-3 rounded-full bg-sky-500 ring-4 ring-sky-100 animate-pulse"></span>
             <div>
@@ -280,7 +325,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 Report Civic Hazard
               </h2>
               <p className="text-[11px] text-slate-500 font-medium">
-                Geospatial clustering with 50-meter deduplication
+                Real-time 50-meter clustering and duplicate prevention
               </p>
             </div>
           </div>
@@ -292,8 +337,8 @@ export const ReportModal: React.FC<ReportModalProps> = ({
           </button>
         </div>
 
-        {/* Scrollable Content */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
+        {/* Scrollable Form Content */}
+        <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1">
           {errorMessage && (
             <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700 flex items-center space-x-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
@@ -308,36 +353,38 @@ export const ReportModal: React.FC<ReportModalProps> = ({
             </div>
           )}
 
-          {/* Category Selector with clean grid wrapping */}
+          {/* Category Selector with Clean, Uncut Spacing */}
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs font-bold uppercase tracking-wider text-slate-500">
                 Issue Category
               </label>
               <span className="text-[11px] text-slate-400 font-medium">
-                Select defect type
+                Choose hazard type
               </span>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
               {CATEGORIES.map((cat) => (
                 <button
                   type="button"
                   key={cat.value}
                   onClick={() => setCategory(cat.value)}
-                  className={`flex items-center space-x-2 p-2.5 rounded-2xl border text-xs font-semibold transition text-left ${
+                  className={`flex items-center space-x-2 p-2.5 rounded-2xl border transition text-left min-h-[44px] ${
                     category === cat.value
-                      ? 'border-sky-500 bg-sky-50/80 text-sky-950 ring-2 ring-sky-500/20 shadow-sm'
+                      ? 'border-sky-500 bg-sky-50/90 text-sky-950 ring-2 ring-sky-500/20 shadow-sm'
                       : `border-slate-200 text-slate-700 bg-white ${cat.accent}`
                   }`}
                 >
                   <span className="text-lg shrink-0">{cat.icon}</span>
-                  <span className="truncate leading-tight">{cat.label}</span>
+                  <span className="text-xs font-semibold leading-tight break-words flex-1">
+                    {cat.label}
+                  </span>
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Interactive Mini-Map Preview & Location Picker */}
+          {/* Location Search & Realistic Map Section */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center space-x-1.5">
@@ -364,8 +411,52 @@ export const ReportModal: React.FC<ReportModalProps> = ({
               </button>
             </div>
 
-            {/* Embedded Mini-Map */}
-            <div className="h-44 w-full rounded-2xl overflow-hidden border border-slate-200 shadow-inner relative z-0">
+            {/* Location Search Bar */}
+            <div className="relative">
+              <div className="flex items-center space-x-2 bg-slate-50 border border-slate-200 rounded-2xl px-3 py-2 focus-within:ring-2 focus-within:ring-sky-500 focus-within:border-sky-500 focus-within:bg-white transition">
+                <Search className="w-4 h-4 text-slate-400 shrink-0" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search street, area, or landmark (e.g. Koramangala, Vijayawada, MG Road)..."
+                  className="w-full bg-transparent text-xs text-slate-800 placeholder-slate-400 focus:outline-none"
+                />
+                {isSearching && <Loader2 className="w-4 h-4 animate-spin text-sky-500 shrink-0" />}
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setSearchResults([]);
+                    }}
+                    className="text-slate-400 hover:text-slate-600 p-0.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Search Suggestions Dropdown */}
+              {searchResults.length > 0 && (
+                <div className="absolute top-full left-0 right-0 mt-1.5 bg-white rounded-2xl shadow-xl border border-slate-200 py-1.5 z-[100] max-h-48 overflow-y-auto animate-in fade-in slide-in-from-top-1">
+                  {searchResults.map((item) => (
+                    <button
+                      key={item.place_id}
+                      type="button"
+                      onClick={() => handleSelectSearchResult(item)}
+                      className="w-full text-left px-3.5 py-2 hover:bg-sky-50 text-xs text-slate-700 flex items-start space-x-2.5 transition border-b border-slate-50 last:border-0"
+                    >
+                      <MapPin className="w-3.5 h-3.5 text-sky-500 shrink-0 mt-0.5" />
+                      <span className="leading-relaxed line-clamp-2">{item.display_name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Embedded Realistic Map Preview */}
+            <div className="h-48 w-full rounded-2xl overflow-hidden border border-slate-200 shadow-inner relative z-0">
               <MapContainer
                 center={[latitude, longitude]}
                 zoom={16}
@@ -373,7 +464,26 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 className="h-full w-full"
                 attributionControl={false}
               >
-                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                {/* Tile Layer: Photorealistic High-Res Satellite vs Modern Realistic Streets */}
+                {mapType === 'satellite' ? (
+                  <>
+                    <TileLayer
+                      url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                      maxZoom={19}
+                    />
+                    {/* Hybrid Street & Place Names Overlay on Satellite */}
+                    <TileLayer
+                      url="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                      maxZoom={19}
+                    />
+                  </>
+                ) : (
+                  <TileLayer
+                    url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+                    maxZoom={19}
+                  />
+                )}
+
                 <MiniMapController center={[latitude, longitude]} />
                 <MiniMapClickHandler
                   onLocationSelect={(lat, lng) => {
@@ -388,13 +498,13 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                   radius={8}
                   pathOptions={{
                     fillColor: '#0284c7',
-                    fillOpacity: 0.9,
+                    fillOpacity: 0.95,
                     color: '#ffffff',
-                    weight: 2.5,
+                    weight: 3,
                   }}
                 />
 
-                {/* Nearby Cluster Marker & 50m Radius Threshold (Amber) if detected */}
+                {/* Nearby Cluster Marker & 50m Radius Boundary if detected */}
                 {nearbyCheck?.hasNearbyCluster && nearbyCheck.cluster && (
                   <>
                     {/* 50m Clustering Radius Boundary */}
@@ -405,8 +515,8 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                         color: '#f59e0b',
                         dashArray: '5, 5',
                         fillColor: '#fef3c7',
-                        fillOpacity: 0.25,
-                        weight: 1.5,
+                        fillOpacity: 0.35,
+                        weight: 2,
                       }}
                     />
                     {/* Nearby Cluster Centroid Pin */}
@@ -417,17 +527,43 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                         fillColor: '#d97706',
                         fillOpacity: 0.95,
                         color: '#ffffff',
-                        weight: 2.5,
+                        weight: 3,
                       }}
                     />
                   </>
                 )}
               </MapContainer>
 
-              {/* Map floating helper badge */}
-              <div className="absolute top-2 left-2 bg-slate-900/75 backdrop-blur-sm text-white px-2.5 py-1 rounded-lg text-[10px] font-semibold pointer-events-none flex items-center space-x-1.5 shadow-sm">
-                <span className="w-2 h-2 rounded-full bg-sky-400"></span>
+              {/* Floating Map Controls */}
+              <div className="absolute top-2 left-2 bg-slate-900/80 backdrop-blur-md text-white px-2.5 py-1 rounded-lg text-[10px] font-semibold pointer-events-none flex items-center space-x-1.5 shadow-md">
+                <span className="w-2 h-2 rounded-full bg-sky-400 animate-ping"></span>
                 <span>Click map to adjust pin position</span>
+              </div>
+
+              {/* Map Layer Switcher (Realistic Satellite vs Modern Streets) */}
+              <div className="absolute top-2 right-2 bg-white/95 backdrop-blur-md rounded-xl p-0.5 shadow-md border border-slate-200 flex items-center space-x-0.5 text-[10px] font-bold z-[400]">
+                <button
+                  type="button"
+                  onClick={() => setMapType('satellite')}
+                  className={`px-2 py-0.5 rounded-lg transition ${
+                    mapType === 'satellite'
+                      ? 'bg-sky-600 text-white shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  🛰️ Satellite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMapType('streets')}
+                  className={`px-2 py-0.5 rounded-lg transition ${
+                    mapType === 'streets'
+                      ? 'bg-sky-600 text-white shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  🗺️ Streets
+                </button>
               </div>
             </div>
 
@@ -457,7 +593,6 @@ export const ReportModal: React.FC<ReportModalProps> = ({
               </div>
             </div>
 
-            {/* Trust & Transparency explanation */}
             <p className="text-[11px] text-slate-500 flex items-center space-x-1.5 pt-0.5">
               <Info className="w-3.5 h-3.5 text-sky-500 shrink-0" />
               <span>We use high-precision GPS to automatically detect and merge duplicate reports within 50 meters.</span>
