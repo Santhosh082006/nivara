@@ -97,6 +97,42 @@ Open **`http://localhost:5173`** in your browser.
 
 ---
 
+## 📧 Real Email & SMS OTP Verification Setup
+
+Nivara features production-grade dual OTP verification for account signup and forgot password flows. In production and local real testing, OTPs are delivered directly to the user's real email inbox and mobile phone via SMS.
+
+### 1. Configure Email Delivery (SMTP)
+You can use **Gmail SMTP** (free with an App Password) or any transactional provider (Brevo, SendGrid, Resend, Mailgun, Amazon SES).
+
+To use Gmail:
+1. Enable **2-Step Verification** on your Google Account: [Google Account Security](https://myaccount.google.com/security)
+2. Generate an **App Password** under Security $\to$ 2-Step Verification $\to$ App passwords.
+3. Configure `server/.env`:
+   ```env
+   SMTP_HOST="smtp.gmail.com"
+   SMTP_PORT=587
+   SMTP_SECURE="false"
+   SMTP_USER="your-email@gmail.com"
+   SMTP_PASS="your-16-character-app-password"
+   SMTP_FROM="\"Nivara Civic Engine\" <your-email@gmail.com>"
+   ```
+
+### 2. Configure SMS Delivery (Twilio)
+You can use a **Twilio Trial Account** (provides free test SMS credits) or any standard Twilio project.
+
+1. Sign up at [Twilio](https://www.twilio.com/) and grab an SMS-capable phone number.
+2. Retrieve your **Account SID** and **Auth Token** from the Twilio Console dashboard.
+3. Configure `server/.env`:
+   ```env
+   TWILIO_ACCOUNT_SID="ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+   TWILIO_AUTH_TOKEN="your_twilio_auth_token"
+   TWILIO_PHONE_NUMBER="+1XXXXXXXXXX"
+   ```
+
+> [!NOTE]
+> If credentials are not supplied or if delivery fails, the API gracefully intercepts the failure and returns HTTP 502 with a clear error: `"We couldn't send the verification code. Please try again or contact support."` Plaintext OTPs are never exposed to the client or leaked in logs.
+
+
 ## 🧪 Testing & Verification
 
 ### Run Mathematical Clustering Unit Tests

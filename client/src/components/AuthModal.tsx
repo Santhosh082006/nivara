@@ -68,10 +68,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [phoneVerifyLoading, setPhoneVerifyLoading] = useState(false);
   const [emailResendCooldown, setEmailResendCooldown] = useState(0);
   const [phoneResendCooldown, setPhoneResendCooldown] = useState(0);
-  const [signupDevHints, setSignupDevHints] = useState<{
-    emailOtp?: string;
-    phoneOtp?: string;
-  } | undefined>();
 
   // Forgot Password flow states
   const [identifier, setIdentifier] = useState('');
@@ -81,7 +77,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [resetToken, setResetToken] = useState('');
   const [maskedDestination, setMaskedDestination] = useState('');
   const [destinationType, setDestinationType] = useState<'email' | 'phone'>('email');
-  const [devOtpHint, setDevOtpHint] = useState<string | undefined>();
   const [forgotResendCooldown, setForgotResendCooldown] = useState(0);
 
   // Common UI states
@@ -184,7 +179,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setSignupSessionId(res.data.sessionId);
       setSignupMaskedEmail(res.data.maskedEmail);
       setSignupMaskedPhone(res.data.maskedPhone);
-      setSignupDevHints(res.data.devOtpHints);
       setIsEmailVerified(false);
       setIsPhoneVerified(false);
       setSignupEmailOtp('');
@@ -249,17 +243,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleResendSignupEmail = async () => {
     setError(null);
     try {
-      const res = await resendSignupOtp({
+      await resendSignupOtp({
         sessionId: signupSessionId,
         type: 'email',
       });
       setEmailResendCooldown(30);
-      if (res.data.devOtpHint) {
-        setSignupDevHints((prev) => ({
-          ...prev,
-          emailOtp: res.data.devOtpHint,
-        }));
-      }
     } catch (err: any) {
       setError(err.message || 'Could not resend email OTP.');
     }
@@ -269,17 +257,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleResendSignupPhone = async () => {
     setError(null);
     try {
-      const res = await resendSignupOtp({
+      await resendSignupOtp({
         sessionId: signupSessionId,
         type: 'phone',
       });
       setPhoneResendCooldown(30);
-      if (res.data.devOtpHint) {
-        setSignupDevHints((prev) => ({
-          ...prev,
-          phoneOtp: res.data.devOtpHint,
-        }));
-      }
     } catch (err: any) {
       setError(err.message || 'Could not resend mobile OTP.');
     }
@@ -334,7 +316,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const res = await requestPasswordReset(identifier.trim());
       setMaskedDestination(res.data.maskedDestination);
       setDestinationType(res.data.destinationType);
-      setDevOtpHint(res.data.devOtpHint);
       setForgotResendCooldown(30);
       setView('forgot-otp');
     } catch (err: any) {
@@ -390,7 +371,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setConfirmPassword('');
       setOtp('');
       setResetToken('');
-      setDevOtpHint(undefined);
       setView('login');
       setSuccessMsg(res.message || 'Password reset successfully. Please sign in.');
     } catch (err: any) {
@@ -715,50 +695,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 email and mobile number with the 6-digit codes sent.
               </div>
 
-              {/* Dev Mode Auto-Fill Box */}
-              {signupDevHints && (
-                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1.5">
-                  <div className="flex items-center space-x-1.5 font-bold">
-                    <Shield className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Demo Mode OTPs:</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[11px] pt-0.5">
-                    <div>
-                      <span>Email OTP: </span>
-                      <strong className="font-mono tracking-wider font-bold">
-                        {signupDevHints.emailOtp}
-                      </strong>
-                    </div>
-                    {!isEmailVerified && (
-                      <button
-                        type="button"
-                        onClick={() => setSignupEmailOtp(signupDevHints.emailOtp || '')}
-                        className="text-[10px] font-bold text-amber-800 underline hover:text-amber-950"
-                      >
-                        Fill Email
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between text-[11px]">
-                    <div>
-                      <span>Mobile OTP: </span>
-                      <strong className="font-mono tracking-wider font-bold">
-                        {signupDevHints.phoneOtp}
-                      </strong>
-                    </div>
-                    {!isPhoneVerified && (
-                      <button
-                        type="button"
-                        onClick={() => setSignupPhoneOtp(signupDevHints.phoneOtp || '')}
-                        className="text-[10px] font-bold text-amber-800 underline hover:text-amber-950"
-                      >
-                        Fill Mobile
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-
               {/* CARD 1: EMAIL OTP */}
               <div
                 className={`p-3 rounded-2xl border transition ${
@@ -1034,27 +970,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   Enter the 6-digit verification code. It expires in 10 minutes.
                 </p>
               </div>
-
-              {devOtpHint && (
-                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center justify-between">
-                  <div className="flex items-center space-x-1.5">
-                    <Shield className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                    <span>
-                      Demo OTP:{' '}
-                      <strong className="tracking-widest font-mono font-bold text-amber-950">
-                        {devOtpHint}
-                      </strong>
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setOtp(devOtpHint)}
-                    className="text-[10px] font-bold text-amber-800 underline hover:text-amber-950 px-1.5 py-0.5 rounded hover:bg-amber-100"
-                  >
-                    Auto-Fill
-                  </button>
-                </div>
-              )}
 
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">

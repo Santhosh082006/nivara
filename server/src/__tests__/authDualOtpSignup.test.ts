@@ -1,6 +1,7 @@
 import request from 'supertest';
 import app from '../app';
 import { prisma } from '../config/db';
+import { __testNotificationStore } from '../services/notificationService';
 
 describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
   const existingUserEmail = 'existing_citizen@example.com';
@@ -98,12 +99,35 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
     });
   });
 
-  describe('2. Dual OTP Issuance & Separate Delivery', () => {
+  describe('2. Delivery Fallback & Error Handling', () => {
+    it('returns clear error when external notification service fails', async () => {
+      process.env.TEST_SIMULATE_DELIVERY_FAILURE = 'true';
+      try {
+        const res = await request(app)
+          .post('/api/auth/signup/start')
+          .send({
+            name: 'Failure Test Citizen',
+            email: 'fail_test@example.com',
+            phone: '+91 9123412345',
+            password: 'password123',
+            role: 'CITIZEN',
+          });
+
+        expect(res.status).toBe(502);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe("We couldn't send the verification code. Please try again or contact support.");
+      } finally {
+        delete process.env.TEST_SIMULATE_DELIVERY_FAILURE;
+      }
+    });
+  });
+
+  describe('3. Dual OTP Issuance & Separate Delivery', () => {
     let sessionId: string;
     let emailOtp: string;
     let phoneOtp: string;
 
-    it('issues two separate 6-digit OTPs for email and mobile', async () => {
+    it('issues two separate 6-digit OTPs dispatched via real services (no on-screen dev leaks)', async () => {
       const res = await request(app)
         .post('/api/auth/signup/start')
         .send({
@@ -120,12 +144,16 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
       expect(res.body.data.maskedEmail).toContain('@');
       expect(res.body.data.maskedPhone).toContain('7777');
 
+      // Requirement 4: Demo OTP hints removed from client response
+      expect(res.body.data.devOtpHints).toBeUndefined();
+
       sessionId = res.body.data.sessionId;
-      emailOtp = res.body.data.devOtpHints.emailOtp;
-      phoneOtp = res.body.data.devOtpHints.phoneOtp;
+      emailOtp = __testNotificationStore.emails[newCitizenEmail];
+      phoneOtp = __testNotificationStore.sms[newCitizenPhone];
 
       expect(emailOtp).toHaveLength(6);
       expect(phoneOtp).toHaveLength(6);
+      expect(emailOtp).not.toBe(phoneOtp);
     });
 
     it('rejects completion before OTPs are verified', async () => {
@@ -216,8 +244,8 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
     });
   });
 
-  describe('3. Authority Account Dual OTP Registration', () => {
-    it('creates an AUTHORITY account after verifying both OTPs', async () => {
+  describe('4. Authority Account Dual OTP Registration', () => {
+    it('creates an AUTHORITY account after verifying both real OTPs', async () => {
       // 1. Start Authority Signup
       const startRes = await request(app)
         .post('/api/auth/signup/start')
@@ -230,7 +258,9 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         });
 
       expect(startRes.status).toBe(200);
-      const { sessionId, devOtpHints } = startRes.body.data;
+      const { sessionId } = startRes.body.data;
+      const authorityEmailOtp = __testNotificationStore.emails[newAuthorityEmail];
+      const authorityPhoneOtp = __testNotificationStore.sms[newAuthorityPhone];
 
       // 2. Verify Email OTP
       await request(app)
@@ -238,7 +268,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         .send({
           sessionId,
           type: 'email',
-          otp: devOtpHints.emailOtp,
+          otp: authorityEmailOtp,
         });
 
       // 3. Verify Phone OTP
@@ -247,7 +277,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         .send({
           sessionId,
           type: 'phone',
-          otp: devOtpHints.phoneOtp,
+          otp: authorityPhoneOtp,
         });
 
       // 4. Complete Registration
@@ -276,7 +306,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
     });
   });
 
-  describe('4. Independent Resend Cooldowns', () => {
+  describe('5. Independent Resend Cooldowns', () => {
     it('enforces 30s cooldown per channel', async () => {
       const testEmail = 'cooldown_test@example.com';
       const testPhone = '+91 9777766666';

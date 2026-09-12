@@ -81,10 +81,6 @@ export async function startSignup(payload: {
     sessionId: string;
     maskedEmail: string;
     maskedPhone: string;
-    devOtpHints?: {
-      emailOtp: string;
-      phoneOtp: string;
-    };
   };
 }> {
   return request('/auth/signup/start', {
@@ -118,9 +114,6 @@ export async function resendSignupOtp(payload: {
 }): Promise<{
   success: boolean;
   message: string;
-  data: {
-    devOtpHint?: string;
-  };
 }> {
   return request('/auth/signup/resend-otp', {
     method: 'POST',
@@ -169,7 +162,6 @@ export async function requestPasswordReset(identifier: string): Promise<{
   data: {
     destinationType: 'email' | 'phone';
     maskedDestination: string;
-    devOtpHint?: string;
   };
 }> {
   return request('/auth/forgot-password', {

@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { prisma } from '../config/db';
 import { Role } from '@prisma/client';
+import { sendEmailOtp, sendSmsOtp } from '../services/notificationService';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'nivara_civic_clustering_jwt_secret_key_2026_secure';
 const JWT_EXPIRES_IN = '7d';
@@ -328,6 +329,22 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
       },
     });
 
+    // Send real OTP via SMTP or Twilio SMS (Requirement 1, 2 & 5)
+    try {
+      if (isEmail) {
+        await sendEmailOtp(user.email, otp, 'forgot-password');
+      } else {
+        await sendSmsOtp(user.phone || trimmed, otp, 'forgot-password');
+      }
+    } catch (deliveryError) {
+      console.error('[Auth:ForgotPassword] Real delivery failed:', deliveryError);
+      res.status(502).json({
+        success: false,
+        message: "We couldn't send the verification code. Please try again or contact support.",
+      });
+      return;
+    }
+
     const destination = isEmail ? maskEmail(user.email) : maskPhone(user.phone || trimmed);
 
     res.status(200).json({
@@ -338,8 +355,6 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
       data: {
         destinationType: isEmail ? 'email' : 'phone',
         maskedDestination: destination,
-        // Provided only in development environment to facilitate local testing/viva evaluation
-        ...(process.env.NODE_ENV !== 'production' ? { devOtpHint: otp } : {}),
       },
     });
   } catch (error) {
@@ -712,6 +727,19 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
       },
     });
 
+    // Send real OTPs via SMTP and Twilio SMS (Requirement 1, 2 & 5)
+    try {
+      await sendEmailOtp(normalizedEmail, emailOtp, 'signup');
+      await sendSmsOtp(normalizedPhone, phoneOtp, 'signup');
+    } catch (deliveryError) {
+      console.error('[Auth:StartSignup] Real delivery failed:', deliveryError);
+      res.status(502).json({
+        success: false,
+        message: "We couldn't send the verification code. Please try again or contact support.",
+      });
+      return;
+    }
+
     const maskedEmail = maskEmail(normalizedEmail);
     const maskedPhone = maskPhone(normalizedPhone);
 
@@ -722,14 +750,6 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
         sessionId: pending.id,
         maskedEmail,
         maskedPhone,
-        ...(process.env.NODE_ENV !== 'production'
-          ? {
-              devOtpHints: {
-                emailOtp,
-                phoneOtp,
-              },
-            }
-          : {}),
       },
     });
   } catch (error) {
@@ -996,12 +1016,21 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
         },
       });
 
+      // Send real email OTP via SMTP (Requirement 1 & 5)
+      try {
+        await sendEmailOtp(pending.email, newOtp, 'signup');
+      } catch (deliveryError) {
+        console.error('[Auth:ResendSignupOtp] Email delivery failed:', deliveryError);
+        res.status(502).json({
+          success: false,
+          message: "We couldn't send the verification code. Please try again or contact support.",
+        });
+        return;
+      }
+
       res.status(200).json({
         success: true,
         message: `New verification code sent to ${maskEmail(pending.email)}.`,
-        data: {
-          ...(process.env.NODE_ENV !== 'production' ? { devOtpHint: newOtp } : {}),
-        },
       });
       return;
     } else {
@@ -1031,12 +1060,21 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
         },
       });
 
+      // Send real mobile OTP via Twilio SMS (Requirement 2 & 5)
+      try {
+        await sendSmsOtp(pending.phone, newOtp, 'signup');
+      } catch (deliveryError) {
+        console.error('[Auth:ResendSignupOtp] SMS delivery failed:', deliveryError);
+        res.status(502).json({
+          success: false,
+          message: "We couldn't send the verification code. Please try again or contact support.",
+        });
+        return;
+      }
+
       res.status(200).json({
         success: true,
         message: `New verification code sent via SMS to ${maskPhone(pending.phone)}.`,
-        data: {
-          ...(process.env.NODE_ENV !== 'production' ? { devOtpHint: newOtp } : {}),
-        },
       });
       return;
     }

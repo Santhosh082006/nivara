@@ -2,6 +2,7 @@ import request from 'supertest';
 import app from '../app';
 import { prisma } from '../config/db';
 import bcrypt from 'bcryptjs';
+import { __testNotificationStore } from '../services/notificationService';
 
 describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
   const testCitizenEmail = 'test_citizen_fp@citizen.in';
@@ -83,7 +84,7 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('detects email identifier for Citizen and delivers OTP', async () => {
+    it('detects email identifier for Citizen and delivers OTP via real service without on-screen leak', async () => {
       const res = await request(app)
         .post('/api/auth/forgot-password')
         .send({ identifier: testCitizenEmail });
@@ -92,11 +93,14 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.destinationType).toBe('email');
       expect(res.body.data.maskedDestination).toContain('@');
-      expect(res.body.data.devOtpHint).toBeDefined();
-      expect(res.body.data.devOtpHint).toHaveLength(6);
+      // Requirement 4: Demo OTP hints removed from client response
+      expect(res.body.data.devOtpHint).toBeUndefined();
+      // Real notification service dispatched 6-digit OTP
+      expect(__testNotificationStore.emails[testCitizenEmail]).toBeDefined();
+      expect(__testNotificationStore.emails[testCitizenEmail]).toHaveLength(6);
     });
 
-    it('detects phone identifier for Authority and delivers OTP via SMS', async () => {
+    it('detects phone identifier for Authority and delivers OTP via SMS without on-screen leak', async () => {
       // Clear lastOtpRequestAt to bypass 30s cooldown for this test
       await prisma.user.update({
         where: { email: testAuthorityEmail },
@@ -111,8 +115,11 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.destinationType).toBe('phone');
       expect(res.body.data.maskedDestination).toContain('5432');
-      expect(res.body.data.devOtpHint).toBeDefined();
-      expect(res.body.data.devOtpHint).toHaveLength(6);
+      // Requirement 4: Demo OTP hints removed from client response
+      expect(res.body.data.devOtpHint).toBeUndefined();
+      // Real notification service dispatched 6-digit SMS OTP
+      expect(__testNotificationStore.sms[testAuthorityPhone]).toBeDefined();
+      expect(__testNotificationStore.sms[testAuthorityPhone]).toHaveLength(6);
     });
   });
 
@@ -129,7 +136,30 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
     });
   });
 
-  describe('3. OTP Verification', () => {
+  describe('3. Delivery Fallback & Error Handling', () => {
+    it('returns clear error when delivery service fails instead of silently failing', async () => {
+      // Clear lastOtpRequestAt
+      await prisma.user.update({
+        where: { email: testCitizenEmail },
+        data: { lastOtpRequestAt: null },
+      });
+
+      process.env.TEST_SIMULATE_DELIVERY_FAILURE = 'true';
+      try {
+        const res = await request(app)
+          .post('/api/auth/forgot-password')
+          .send({ identifier: testCitizenEmail });
+
+        expect(res.status).toBe(502);
+        expect(res.body.success).toBe(false);
+        expect(res.body.message).toBe("We couldn't send the verification code. Please try again or contact support.");
+      } finally {
+        delete process.env.TEST_SIMULATE_DELIVERY_FAILURE;
+      }
+    });
+  });
+
+  describe('4. OTP Verification', () => {
     let generatedOtp: string;
 
     beforeEach(async () => {
@@ -139,11 +169,11 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
         data: { lastOtpRequestAt: null },
       });
 
-      const res = await request(app)
+      await request(app)
         .post('/api/auth/forgot-password')
         .send({ identifier: testCitizenEmail });
 
-      generatedOtp = res.body.data.devOtpHint;
+      generatedOtp = __testNotificationStore.emails[testCitizenEmail];
     });
 
     it('rejects invalid 6-digit format', async () => {
@@ -176,7 +206,7 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
     });
   });
 
-  describe('4. Set New Password & Post-Reset Verification', () => {
+  describe('5. Set New Password & Post-Reset Verification', () => {
     let resetToken: string;
 
     beforeEach(async () => {
@@ -185,11 +215,11 @@ describe('Auth: Forgot Password Feature (Citizen & Authority)', () => {
         data: { lastOtpRequestAt: null },
       });
 
-      const fpRes = await request(app)
+      await request(app)
         .post('/api/auth/forgot-password')
         .send({ identifier: testCitizenEmail });
 
-      const otp = fpRes.body.data.devOtpHint;
+      const otp = __testNotificationStore.emails[testCitizenEmail];
 
       const verifyRes = await request(app)
         .post('/api/auth/verify-otp')
