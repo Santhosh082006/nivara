@@ -97,11 +97,26 @@ Open **`http://localhost:5173`** in your browser.
 
 ---
 
-## 📧 Real Email & SMS OTP Verification Setup
+## 📧 Production Real-Time OTP Authentication & Security Architecture
 
-Nivara features production-grade dual OTP verification for account signup and forgot password flows. In production and local real testing, OTPs are delivered directly to the user's real email inbox and mobile phone via SMS.
+Nivara implements a zero-trust, cryptographically secure real-time OTP authentication architecture across **Sign In**, **Sign Up**, and **Forgot Password / Password Reset**:
 
-### 1. Configure Email Delivery (SMTP)
+- **Real-Time Delivery Only**: No demo OTPs, no mock OTPs, no auto-fill codes, and no plaintext logging. OTPs are securely dispatched via SMTP email (Nodemailer) and Twilio SMS.
+- **Dedicated HMAC-SHA256 OTP Hashing**: Decoupled from `JWT_SECRET` with a mandatory server-side `OTP_SECRET`. Codes are hashed with timing-safe comparisons (`crypto.timingSafeEqual`).
+- **Two-Step Sign-In**: Validates credentials $\to$ dispatches real-time OTP to user's registered channel $\to$ issues short-lived `loginChallengeToken` (`purpose: 'LOGIN_OTP'`) $\to$ verifies 6-digit OTP $\to$ issues session JWT.
+- **Dual-OTP Signup**: Requires simultaneous, independent verification of both Email and Mobile phone before the account is committed to the database.
+- **Anti-Account-Enumeration**: Forgot Password requests always return a uniform generic response preventing attacker reconnaissance.
+- **Strict Password Policy**: Minimum 12 characters requiring uppercase, lowercase, numeric digit, and special character (`!@#$%^&*()_+-=[]{}:;'",.?/`), enforced with live UI checklist feedback and show/hide eye toggles.
+- **Atomic Concurrency Protection**: Transactions (`prisma.$transaction`) prevent concurrent replay or double-consumption attacks.
+- **Sliding-Window Rate Limiting**: Enforces 30-second cooldowns per channel and locks verification sessions after 5 failed attempts.
+
+### 1. Dedicated `OTP_SECRET` Configuration
+Add a 64-character hex secret to `server/.env` to pepper all HMAC-SHA256 OTP hashes:
+```env
+OTP_SECRET="e9f4c8a1b3d567290f84a1e67c8b9d0e23456789abcdef0123456789abcdef01"
+```
+
+### 2. Configure Email Delivery (SMTP)
 You can use **Gmail SMTP** (free with an App Password) or any transactional provider (Brevo, SendGrid, Resend, Mailgun, Amazon SES).
 
 To use Gmail:
@@ -117,7 +132,7 @@ To use Gmail:
    SMTP_FROM="\"Nivara Civic Engine\" <your-email@gmail.com>"
    ```
 
-### 2. Configure SMS Delivery (Twilio)
+### 3. Configure SMS Delivery (Twilio)
 You can use a **Twilio Trial Account** (provides free test SMS credits) or any standard Twilio project.
 
 1. Sign up at [Twilio](https://www.twilio.com/) and grab an SMS-capable phone number.
@@ -130,17 +145,22 @@ You can use a **Twilio Trial Account** (provides free test SMS credits) or any s
    ```
 
 > [!NOTE]
-> If credentials are not supplied or if delivery fails, the API gracefully intercepts the failure and returns HTTP 502 with a clear error: `"We couldn't send the verification code. Please try again or contact support."` Plaintext OTPs are never exposed to the client or leaked in logs.
+> In automated Jest test environments (`NODE_ENV=test`), notifications are intercepted safely in memory (`__testNotificationStore`) without external network hits. In local production runs, if delivery credentials fail, the API returns HTTP 502 with: `"We couldn't send the verification code. Please try again or contact support."` Plaintext OTPs are never exposed to the client or leaked in logs.
 
 
 ## 🧪 Testing & Verification
 
-### Run Mathematical Clustering Unit Tests
+### Run Full Test Suite (50 Automated Tests)
 ```bash
 cd server
 npm test
 ```
-*Executes 13 automated tests covering Haversine distance, bounding-box pre-filtering, incremental centroid drift, threshold boundaries (49.8m vs 50.2m), and equidistant tie-breaking.*
+*Executes 50 automated tests covering:*
+- **Two-Step Sign-In OTP Flow** (`authSignInOtp.test.ts`): Credential challenge, channel detection, 5-attempt lockout, 30s resend cooldown, atomic replay protection.
+- **Dual OTP Signup Verification** (`authDualOtpSignup.test.ts`): Mobile format, 12+ char password enforcement, independent email & SMS OTP verification, duplicate prevention, partial delivery rollback.
+- **Forgot Password Feature** (`authForgotPassword.test.ts`): Anti-account-enumeration, reset OTP delivery, passwordResetToken issuance, strong password validation.
+- **Mathematical Geospatial Clustering** (`clustering.test.ts`): Haversine distance, bounding-box pre-filtering, incremental centroid drift, threshold discrimination.
+- **Boundary & Edge Cases** (`edgeCases.test.ts`): 49.8m vs 50.2m threshold boundaries, antipodal inputs, dynamic cluster fusion.
 
 ### Run Real-World Messy Data Simulation
 ```bash
@@ -148,18 +168,6 @@ cd server
 npm run simulate
 ```
 *Simulates 38 realistic citizen complaints across 6 distinct Bangalore zones with GPS jitter, demonstrating an impressive **76.3% deduplication rate** and verified category isolation.*
-
----
-
-## 🔑 Demo Accounts
-
-| Role | Email | Password | Access Privileges |
-| :--- | :--- | :--- | :--- |
-| **Citizen** | `aarav@citizen.in` | `password123` | Submit reports, upvote clusters, view live map |
-| **Citizen** | `priya@citizen.in` | `password123` | Submit reports, upvote clusters |
-| **Authority** | `authority@bbmp.gov.in` | `password123` | Municipal priority triage, status transition |
-
-*(Both accounts are pre-filled in the Sign-In modal for instant one-click demo testing)*
 
 ---
 

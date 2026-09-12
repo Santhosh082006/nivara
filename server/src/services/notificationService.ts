@@ -96,10 +96,14 @@ export const __testNotificationStore: {
 export async function sendEmailOtp(
   to: string,
   otp: string,
-  purpose: 'signup' | 'forgot-password'
+  purpose: 'signup' | 'forgot-password' | 'login'
 ): Promise<void> {
   const purposeTitle =
-    purpose === 'signup' ? 'Civic Account Registration' : 'Password Reset Request';
+    purpose === 'signup'
+      ? 'Civic Account Registration'
+      : purpose === 'login'
+      ? 'Sign In Verification'
+      : 'Password Reset Request';
 
   // Automated test environment bypass (unless real credentials supplied)
   if (process.env.NODE_ENV === 'test' && !process.env.FORCE_REAL_NOTIFICATIONS) {
@@ -118,7 +122,8 @@ export async function sendEmailOtp(
   const fromAddress =
     process.env.SMTP_FROM || `"Nivara Civic Engine" <${process.env.SMTP_USER}>`;
 
-  const subject = `Your Nivara verification code: ${otp}`;
+  // Explicit security requirement: Never leak OTP in email subject line (prevents preview / lock screen leaks)
+  const subject = 'NIVARA verification code';
 
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
@@ -150,7 +155,7 @@ export async function sendEmailOtp(
     </div>
   `;
 
-  const text = `Your Nivara verification code is: ${otp}\n\nThis code is valid for 10 minutes.\nIf you did not request this code, please ignore this email.`;
+  const text = `NIVARA\n\nYour verification code:\n\n[ ${otp} ]\n\nThis code expires in 10 minutes.\n\nIf you did not request this code, please ignore this email.`;
 
   await transporter.sendMail({
     from: fromAddress,
@@ -167,7 +172,7 @@ export async function sendEmailOtp(
 export async function sendSmsOtp(
   to: string,
   otp: string,
-  purpose: 'signup' | 'forgot-password'
+  purpose: 'signup' | 'forgot-password' | 'login'
 ): Promise<void> {
   // Automated test environment bypass (unless real credentials supplied)
   if (process.env.NODE_ENV === 'test' && !process.env.FORCE_REAL_NOTIFICATIONS) {
@@ -183,7 +188,7 @@ export async function sendSmsOtp(
     throw new Error('Twilio SMS service is not configured (missing TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, or TWILIO_PHONE_NUMBER).');
   }
 
-  const body = `Your Nivara verification code is ${otp}. It expires in 10 minutes. Do not share this code with anyone.`;
+  const body = `NIVARA verification code: ${otp}.\nThis code expires in 10 minutes.`;
 
   // Format phone number to E.164 if possible
   let formattedPhone = to.trim();

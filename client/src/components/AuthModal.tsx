@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import {
   loginUser,
+  verifyLoginOtp,
+  resendLoginOtp,
   setAuthToken,
   requestPasswordReset,
   verifyResetOtp,
@@ -27,6 +29,8 @@ import {
   completeSignup,
 } from '../api';
 import { User as UserType } from '../types';
+import { PasswordInput } from './PasswordInput';
+import { PasswordChecklist, isPasswordValid } from './PasswordChecklist';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -36,6 +40,7 @@ interface AuthModalProps {
 
 type ModalView =
   | 'login'
+  | 'login-otp'
   | 'register'
   | 'signup-verify'
   | 'forgot-identifier'
@@ -54,7 +59,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [signupConfirmPassword, setSignupConfirmPassword] = useState('');
   const [role, setRole] = useState<'CITIZEN' | 'AUTHORITY'>('CITIZEN');
+
+  // Login OTP Challenge states
+  const [loginChallengeToken, setLoginChallengeToken] = useState('');
+  const [loginMaskedDestination, setLoginMaskedDestination] = useState('');
+  const [loginChannel, setLoginChannel] = useState<'email' | 'phone'>('email');
+  const [loginOtp, setLoginOtp] = useState('');
+  const [loginResendCooldown, setLoginResendCooldown] = useState(0);
 
   // Dual OTP Signup verification states
   const [signupSessionId, setSignupSessionId] = useState('');
@@ -83,6 +96,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Ticker for Login OTP cooldown
+  useEffect(() => {
+    if (loginResendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setLoginResendCooldown((prev) => (prev > 1 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [loginResendCooldown]);
 
   // Ticker for Forgot Password OTP cooldown
   useEffect(() => {
@@ -117,10 +139,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setError(null);
     setSuccessMsg(null);
     setView('login');
+    setLoginOtp('');
+    setLoginChallengeToken('');
     onClose();
   };
 
-  // Sign In submit handler
+  // Sign In Step 1: Submit credentials & receive login challenge
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -128,12 +152,65 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
 
     try {
-      const res = await loginUser({ email, password });
+      const res = await loginUser({ email: email.trim(), password });
+      if (res.data && res.data.loginChallengeToken) {
+        setLoginChallengeToken(res.data.loginChallengeToken);
+        setLoginMaskedDestination(res.data.maskedDestination);
+        setLoginChannel(res.data.channel || 'email');
+        setLoginOtp('');
+        setLoginResendCooldown(30);
+        setView('login-otp');
+        setSuccessMsg(`Verification code sent to your registered ${res.data.channel === 'phone' ? 'mobile number' : 'email'}.`);
+      } else {
+        throw new Error('Verification required.');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Invalid email or password.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Sign In Step 2: Verify 6-digit Login OTP
+  const handleVerifyLoginOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccessMsg(null);
+
+    const cleanOtp = loginOtp.trim();
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      setError('Please enter a valid 6-digit numeric OTP.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await verifyLoginOtp({
+        loginChallengeToken,
+        otp: cleanOtp,
+      });
       setAuthToken(res.data.token);
       onAuthSuccess(res.data.user);
       handleClose();
     } catch (err: any) {
-      setError(err.message || 'Invalid email or password.');
+      setError(err.message || 'Failed to verify sign-in OTP.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Resend Login OTP
+  const handleResendLoginOtp = async () => {
+    if (loginResendCooldown > 0) return;
+    setError(null);
+    setSuccessMsg(null);
+    setLoading(true);
+    try {
+      const res = await resendLoginOtp({ loginChallengeToken });
+      setLoginResendCooldown(30);
+      setSuccessMsg(res.message || 'A new verification code has been sent.');
+    } catch (err: any) {
+      setError(err.message || 'Could not resend login OTP.');
     } finally {
       setLoading(false);
     }
@@ -161,8 +238,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters long.');
+    if (!isPasswordValid(password, signupConfirmPassword)) {
+      setError('Password must meet all complexity requirements and confirm password must match.');
       return;
     }
 
@@ -173,6 +250,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         email: email.trim(),
         phone: phone.trim(),
         password,
+        confirmPassword: signupConfirmPassword,
         role,
       });
 
@@ -277,13 +355,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         sessionId: signupSessionId,
         name: name.trim(),
         password,
+        confirmPassword: signupConfirmPassword,
         role,
       });
 
       // Clear form states
       setName('');
       setPassword('');
+      setSignupConfirmPassword('');
       setPhone('');
+      setEmail('');
       setSignupSessionId('');
       setSignupEmailOtp('');
       setSignupPhoneOtp('');
@@ -314,8 +395,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     try {
       const res = await requestPasswordReset(identifier.trim());
-      setMaskedDestination(res.data.maskedDestination);
-      setDestinationType(res.data.destinationType);
+      setMaskedDestination(res.data?.maskedDestination || identifier.trim());
+      setDestinationType(res.data?.destinationType || (identifier.includes('@') ? 'email' : 'phone'));
       setForgotResendCooldown(30);
       setView('forgot-otp');
     } catch (err: any) {
@@ -339,7 +420,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     try {
       const res = await verifyResetOtp(identifier.trim(), cleanOtp);
-      setResetToken(res.data.resetToken);
+      setResetToken(res.data.resetToken || res.data.passwordResetToken || '');
       setView('forgot-reset');
     } catch (err: any) {
       setError(err.message || 'Invalid or expired OTP. Please try again.');
@@ -353,13 +434,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if (newPassword.length < 6) {
-      setError('New password must be at least 6 characters long.');
-      return;
-    }
-
-    if (newPassword !== confirmPassword) {
-      setError('Passwords do not match. Please verify.');
+    if (!isPasswordValid(newPassword, confirmPassword)) {
+      setError('Password must meet all complexity requirements and confirm password must match.');
       return;
     }
 
@@ -402,12 +478,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         {/* Modal Header */}
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
           <div className="flex items-center space-x-2">
-            {(view.startsWith('forgot-') || view === 'signup-verify') && (
+            {(view.startsWith('forgot-') || view === 'signup-verify' || view === 'login-otp') && (
               <button
                 type="button"
                 onClick={() => {
                   setError(null);
-                  if (view === 'signup-verify') setView('register');
+                  if (view === 'login-otp') setView('login');
+                  else if (view === 'signup-verify') setView('register');
                   else if (view === 'forgot-otp') setView('forgot-identifier');
                   else if (view === 'forgot-reset') setView('forgot-otp');
                   else setView('login');
@@ -420,6 +497,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             )}
             <h2 className="text-sm font-bold text-slate-900">
               {view === 'login' && 'Sign In to Nivara'}
+              {view === 'login-otp' && 'Verify Sign-In OTP'}
               {view === 'register' && 'Create Civic Account'}
               {view === 'signup-verify' && 'Dual OTP Verification'}
               {view === 'forgot-identifier' && 'Reset Password'}
@@ -455,29 +533,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           {/* VIEW: LOGIN */}
           {view === 'login' && (
             <form onSubmit={handleLoginSubmit} className="space-y-4">
-              {/* Quick Demo Switchers */}
-              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-center">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1.5 tracking-wider">
-                  Quick Demo Accounts
-                </span>
-                <div className="flex space-x-2">
-                  <button
-                    type="button"
-                    onClick={() => handleQuickFill('citizen')}
-                    className="flex-1 py-1.5 px-2 bg-white border border-slate-200 hover:border-sky-500 hover:bg-sky-50/50 rounded-lg text-[11px] font-semibold text-slate-700 transition"
-                  >
-                    Citizen Demo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickFill('authority')}
-                    className="flex-1 py-1.5 px-2 bg-white border border-slate-200 hover:border-amber-500 hover:bg-amber-50/50 rounded-lg text-[11px] font-semibold text-slate-700 transition"
-                  >
-                    Authority Demo
-                  </button>
-                </div>
-              </div>
-
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
                   Email Address
@@ -497,7 +552,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                  <label htmlFor="login-password" className="block text-xs font-bold uppercase tracking-wider text-slate-500">
                     Password
                   </label>
                   <button
@@ -513,17 +568,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     Forgot Password?
                   </button>
                 </div>
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    placeholder="••••••••"
-                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  />
-                  <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                </div>
+                <PasswordInput
+                  id="login-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                  placeholder="••••••••••••"
+                />
               </div>
 
               <button
@@ -549,6 +601,91 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   className="text-xs text-slate-500 hover:text-sky-600 transition font-medium"
                 >
                   Don't have an account? Sign up
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* VIEW: LOGIN OTP (STEP 2 OF SIGN IN) */}
+          {view === 'login-otp' && (
+            <form onSubmit={handleVerifyLoginOtp} className="space-y-4">
+              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 text-xs text-slate-700 space-y-1.5">
+                <div className="flex items-center space-x-2 font-bold text-slate-800">
+                  {loginChannel === 'phone' ? (
+                    <Smartphone className="w-4 h-4 text-emerald-600" />
+                  ) : (
+                    <Mail className="w-4 h-4 text-sky-600" />
+                  )}
+                  <span>Code sent to {loginMaskedDestination}</span>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Enter the real-time 6-digit verification code sent to your registered {loginChannel === 'phone' ? 'mobile number' : 'email'}. Code expires in 10 minutes.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
+                  6-Digit Verification Code
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    value={loginOtp}
+                    onChange={(e) => setLoginOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    required
+                    autoFocus
+                    placeholder="••••••"
+                    className="w-full text-center tracking-[0.6em] font-mono text-base font-bold px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-3.5 pointer-events-none" />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-xs pt-1">
+                <span className="text-slate-500">Didn't receive code?</span>
+                {loginResendCooldown > 0 ? (
+                  <span className="text-slate-400 font-medium">
+                    Resend OTP in <strong className="text-slate-600">{loginResendCooldown}s</strong>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleResendLoginOtp}
+                    disabled={loading}
+                    className="font-bold text-sky-600 hover:text-sky-700 hover:underline transition flex items-center space-x-1"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Resend OTP</span>
+                  </button>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading || loginOtp.length !== 6}
+                className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-md shadow-sky-600/20 transition active:scale-95 disabled:opacity-50 flex items-center justify-center space-x-2"
+              >
+                {loading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <span>Verify & Sign In</span>
+                )}
+              </button>
+
+              <div className="text-center pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setSuccessMsg(null);
+                    setView('login');
+                  }}
+                  className="text-xs text-slate-500 hover:text-sky-600 transition font-medium"
+                >
+                  Back to sign in
                 </button>
               </div>
             </form>
@@ -608,26 +745,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Smartphone className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                 </div>
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Both Email and Mobile will be verified via separate 6-digit OTPs.
+                  Both Email and Mobile will be verified via real-time 6-digit OTPs.
                 </p>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
-                  Password <span className="text-rose-500">*</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    placeholder="At least 6 characters"
-                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  />
-                  <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                </div>
-              </div>
+              <PasswordInput
+                id="signup-password"
+                label="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                placeholder="At least 12 characters"
+              />
+
+              <PasswordInput
+                id="signup-confirm-password"
+                label="Confirm Password"
+                value={signupConfirmPassword}
+                onChange={(e) => setSignupConfirmPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                placeholder="Repeat password"
+              />
+
+              <PasswordChecklist
+                password={password}
+                confirmPassword={signupConfirmPassword}
+              />
 
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
@@ -661,8 +806,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <button
                 type="submit"
-                disabled={loading}
-                className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-md shadow-sky-600/20 transition active:scale-95 disabled:opacity-50 flex items-center justify-center space-x-2"
+                disabled={loading || !isPasswordValid(password, signupConfirmPassword)}
+                className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-bold rounded-xl shadow-md shadow-sky-600/20 transition active:scale-95 flex items-center justify-center space-x-2"
               >
                 {loading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -1028,47 +1173,38 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           {view === 'forgot-reset' && (
             <form onSubmit={handleForgotResetPassword} className="space-y-4">
               <p className="text-xs text-slate-600 leading-relaxed">
-                Choose a strong new password for your account (minimum 6 characters).
+                Choose a strong new password for your account (minimum 12 characters with uppercase, lowercase, digit, and symbol).
               </p>
 
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
-                  New Password
-                </label>
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    required
-                    placeholder="At least 6 characters"
-                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  />
-                  <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                </div>
-              </div>
+              <PasswordInput
+                id="reset-new-password"
+                label="New Password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                placeholder="At least 12 characters"
+              />
 
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
-                  Confirm Password
-                </label>
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    required
-                    placeholder="Repeat new password"
-                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  />
-                  <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                </div>
-              </div>
+              <PasswordInput
+                id="reset-confirm-password"
+                label="Confirm Password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                placeholder="Repeat new password"
+              />
+
+              <PasswordChecklist
+                password={newPassword}
+                confirmPassword={confirmPassword}
+              />
 
               <button
                 type="submit"
-                disabled={loading || !newPassword || !confirmPassword}
-                className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-md shadow-sky-600/20 transition active:scale-95 disabled:opacity-50 flex items-center justify-center space-x-2"
+                disabled={loading || !isPasswordValid(newPassword, confirmPassword)}
+                className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-bold rounded-xl shadow-md shadow-sky-600/20 transition active:scale-95 flex items-center justify-center space-x-2"
               >
                 {loading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />

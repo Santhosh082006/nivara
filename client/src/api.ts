@@ -73,6 +73,7 @@ export async function startSignup(payload: {
   email: string;
   phone: string;
   password: string;
+  confirmPassword?: string;
   role: string;
 }): Promise<{
   success: boolean;
@@ -125,6 +126,7 @@ export async function completeSignup(payload: {
   sessionId: string;
   name: string;
   password: string;
+  confirmPassword?: string;
   role: string;
 }): Promise<{
   success: boolean;
@@ -139,11 +141,42 @@ export async function completeSignup(payload: {
   });
 }
 
+export interface LoginChallengeResponse {
+  success: boolean;
+  message: string;
+  data: {
+    requiresOtp: boolean;
+    loginChallengeToken: string;
+    channel: 'email' | 'phone';
+    maskedDestination: string;
+  };
+}
+
 export async function loginUser(payload: {
-  email: string;
+  identifier?: string;
+  email?: string;
   password: string;
-}): Promise<{ success: boolean; data: { user: User; token: string } }> {
+}): Promise<LoginChallengeResponse> {
   return request('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function verifyLoginOtp(payload: {
+  loginChallengeToken: string;
+  otp: string;
+}): Promise<{ success: boolean; message: string; data: { user: User; token: string } }> {
+  return request('/auth/login/verify-otp', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function resendLoginOtp(payload: {
+  loginChallengeToken: string;
+}): Promise<{ success: boolean; message: string }> {
+  return request('/auth/login/resend-otp', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -159,12 +192,22 @@ export async function getCurrentUser(): Promise<{
 export async function requestPasswordReset(identifier: string): Promise<{
   success: boolean;
   message: string;
-  data: {
-    destinationType: 'email' | 'phone';
-    maskedDestination: string;
+  data?: {
+    destinationType?: 'email' | 'phone';
+    maskedDestination?: string;
   };
 }> {
-  return request('/auth/forgot-password', {
+  return request('/auth/password-reset/request', {
+    method: 'POST',
+    body: JSON.stringify({ identifier }),
+  });
+}
+
+export async function resendResetOtp(identifier: string): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  return request('/auth/password-reset/resend-otp', {
     method: 'POST',
     body: JSON.stringify({ identifier }),
   });
@@ -176,9 +219,9 @@ export async function verifyResetOtp(
 ): Promise<{
   success: boolean;
   message: string;
-  data: { resetToken: string };
+  data: { resetToken: string; passwordResetToken?: string };
 }> {
-  return request('/auth/verify-otp', {
+  return request('/auth/password-reset/verify-otp', {
     method: 'POST',
     body: JSON.stringify({ identifier, otp }),
   });
@@ -192,11 +235,12 @@ export async function resetPassword(
   success: boolean;
   message: string;
 }> {
-  return request('/auth/reset-password', {
+  return request('/auth/password-reset/reset', {
     method: 'POST',
-    body: JSON.stringify({ resetToken, newPassword, confirmPassword }),
+    body: JSON.stringify({ resetToken, passwordResetToken: resetToken, newPassword, confirmPassword }),
   });
 }
+
 
 // Clusters API
 export async function fetchClusters(params?: {

@@ -5,6 +5,8 @@ import crypto from 'crypto';
 import { prisma } from '../config/db';
 import { Role } from '@prisma/client';
 import { sendEmailOtp, sendSmsOtp } from '../services/notificationService';
+import { generateSecureOtp, hashOtp, verifyOtpHash } from '../utils/otpHelper';
+import { validatePassword, validatePasswordConfirmation } from '../utils/passwordValidator';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'nivara_civic_clustering_jwt_secret_key_2026_secure';
 const JWT_EXPIRES_IN = '7d';
@@ -101,30 +103,29 @@ export async function register(req: Request, res: Response): Promise<void> {
 }
 
 /**
- * Log in an existing user and issue a JWT token
+ * Step 1: Sign in with credentials (email/mobile + password)
+ * Issues a short-lived LOGIN_OTP challenge and dispatches a 6-digit OTP to the registered channel.
+ * Never issues normal application JWT before OTP verification!
  */
 export async function login(req: Request, res: Response): Promise<void> {
   try {
-    const { email, password } = req.body;
+    const { identifier, email, phone, password } = req.body;
+    const rawIdentifier = (identifier || email || phone || '').toString().trim();
 
-    if (!email || !password) {
+    if (!rawIdentifier || !password) {
       res.status(400).json({
         success: false,
-        message: 'Email and password are required',
+        message: 'Email/mobile number and password are required.',
       });
       return;
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
-
-    const user = await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-    });
+    const user = await findUserByIdentifier(rawIdentifier);
 
     if (!user) {
       res.status(401).json({
         success: false,
-        message: 'Invalid email or password',
+        message: 'Invalid email/mobile or password',
       });
       return;
     }
@@ -133,18 +134,229 @@ export async function login(req: Request, res: Response): Promise<void> {
     if (!isMatch) {
       res.status(401).json({
         success: false,
-        message: 'Invalid email or password',
+        message: 'Invalid email/mobile or password',
       });
       return;
     }
 
-    // Generate JWT token
-    const token = jwt.sign(
+    // Determine verification channel based on user input & verified contact details
+    const isEmail = rawIdentifier.includes('@');
+    const channel: 'email' | 'phone' = isEmail ? 'email' : 'phone';
+    const destination = isEmail ? user.email : (user.phone || rawIdentifier);
+
+    // Cooldown check (30 seconds between OTP requests)
+    const COOLDOWN_MS = 30 * 1000;
+    if (user.loginLastSentAt) {
+      const elapsed = Date.now() - new Date(user.loginLastSentAt).getTime();
+      if (elapsed < COOLDOWN_MS) {
+        const remainingSeconds = Math.ceil((COOLDOWN_MS - elapsed) / 1000);
+        res.status(429).json({
+          success: false,
+          message: `Please wait ${remainingSeconds} seconds before requesting a new OTP.`,
+          retryAfter: remainingSeconds,
+        });
+        return;
+      }
+    }
+
+    // Generate cryptographically secure 6-digit OTP & HMAC-SHA256 hash
+    const otp = generateSecureOtp();
+    const otpHash = hashOtp(otp);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Update user record with hashed OTP and reset verification attempts
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        loginOtpHash: otpHash,
+        loginOtpExpiresAt: expiresAt,
+        loginOtpAttempts: 0,
+        loginLastSentAt: new Date(),
+      },
+    });
+
+    // Deliver real OTP to registered channel
+    try {
+      if (channel === 'email') {
+        await sendEmailOtp(user.email, otp, 'login');
+      } else {
+        await sendSmsOtp(destination, otp, 'login');
+      }
+    } catch (deliveryError) {
+      console.error('[Auth:Login] Delivery failed:', deliveryError);
+      res.status(502).json({
+        success: false,
+        message: "We couldn't send the verification code. Please try again or contact support.",
+      });
+      return;
+    }
+
+    // Issue short-lived LOGIN_OTP challenge token (10 minutes, purpose-bound)
+    const loginChallengeToken = jwt.sign(
       {
         userId: user.id,
-        email: user.email,
-        role: user.role,
-        name: user.name,
+        purpose: 'LOGIN_OTP',
+        jti: crypto.randomUUID(),
+      },
+      JWT_SECRET,
+      { expiresIn: '10m' }
+    );
+
+    const maskedDestination = channel === 'email' ? maskEmail(user.email) : maskPhone(destination);
+
+    res.status(200).json({
+      success: true,
+      message: 'Verification code sent successfully.',
+      data: {
+        requiresOtp: true,
+        loginChallengeToken,
+        channel,
+        maskedDestination,
+      },
+    });
+  } catch (error) {
+    console.error('[Auth:Login] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error during login',
+    });
+  }
+}
+
+/**
+ * Step 2: Verify Login OTP and issue normal authenticated JWT
+ * Atomic conditional consumption guarantees exactly one concurrent request can consume the OTP.
+ */
+export async function verifyLoginOtp(req: Request, res: Response): Promise<void> {
+  try {
+    const { loginChallengeToken, otp } = req.body;
+
+    if (!loginChallengeToken || !otp) {
+      res.status(400).json({
+        success: false,
+        message: 'Login challenge token and verification code are required.',
+      });
+      return;
+    }
+
+    const cleanOtp = otp.toString().trim();
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      res.status(400).json({
+        success: false,
+        message: 'Please enter a valid 6-digit verification code.',
+      });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(loginChallengeToken, JWT_SECRET);
+    } catch {
+      res.status(401).json({
+        success: false,
+        message: 'Invalid or expired login challenge session. Please sign in again.',
+      });
+      return;
+    }
+
+    if (decoded.purpose !== 'LOGIN_OTP' || !decoded.userId) {
+      res.status(401).json({
+        success: false,
+        message: 'Invalid login challenge token.',
+      });
+      return;
+    }
+
+    // Atomic OTP verification and consumption in Prisma transaction
+    const txResult = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({
+        where: { id: decoded.userId },
+      });
+
+      if (!user || !user.loginOtpHash || !user.loginOtpExpiresAt) {
+        return { error: 'Invalid or expired verification session. Please sign in again.', status: 400 };
+      }
+
+      if (new Date() > new Date(user.loginOtpExpiresAt)) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { loginOtpHash: null, loginOtpExpiresAt: null },
+        });
+        return { error: 'Verification code has expired. Please sign in again.', status: 400 };
+      }
+
+      if (user.loginOtpAttempts >= 5) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { loginOtpHash: null, loginOtpExpiresAt: null },
+        });
+        return {
+          error: 'Too many failed verification attempts. This challenge has been locked. Please sign in again.',
+          status: 429,
+        };
+      }
+
+      const isMatch = verifyOtpHash(cleanOtp, user.loginOtpHash);
+      if (!isMatch) {
+        const newAttempts = user.loginOtpAttempts + 1;
+        if (newAttempts >= 5) {
+          await tx.user.update({
+            where: { id: user.id },
+            data: { loginOtpHash: null, loginOtpExpiresAt: null, loginOtpAttempts: newAttempts },
+          });
+          return {
+            error: 'Too many failed verification attempts. This challenge has been locked. Please sign in again.',
+            status: 429,
+          };
+        } else {
+          await tx.user.update({
+            where: { id: user.id },
+            data: { loginOtpAttempts: newAttempts },
+          });
+          const remaining = 5 - newAttempts;
+          return {
+            error: `Invalid verification code. You have ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`,
+            status: 400,
+          };
+        }
+      }
+
+      // ATOMIC CONSUMPTION: Clear OTP state immediately so same OTP can never authenticate twice
+      const updatedUser = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          loginOtpHash: null,
+          loginOtpExpiresAt: null,
+          loginOtpAttempts: 0,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          phone: true,
+          createdAt: true,
+        },
+      });
+
+      return { user: updatedUser };
+    });
+
+    if ('error' in txResult) {
+      res.status(txResult.status || 400).json({
+        success: false,
+        message: txResult.error,
+      });
+      return;
+    }
+
+    // Normal authenticated JWT session issued ONLY after successful OTP verification
+    const token = jwt.sign(
+      {
+        userId: txResult.user.id,
+        email: txResult.user.email,
+        role: txResult.user.role,
+        name: txResult.user.name,
       },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
@@ -154,22 +366,118 @@ export async function login(req: Request, res: Response): Promise<void> {
       success: true,
       message: 'Authentication successful',
       data: {
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          phone: user.phone,
-          createdAt: user.createdAt,
-        },
+        user: txResult.user,
         token,
       },
     });
   } catch (error) {
-    console.error('[Auth:Login] Error:', error);
+    console.error('[Auth:VerifyLoginOtp] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error during login',
+      message: 'Internal server error during login OTP verification.',
+    });
+  }
+}
+
+/**
+ * Resend Login OTP with 30s cooldown and new OTP generation
+ */
+export async function resendLoginOtp(req: Request, res: Response): Promise<void> {
+  try {
+    const { loginChallengeToken } = req.body;
+
+    if (!loginChallengeToken) {
+      res.status(400).json({
+        success: false,
+        message: 'Login challenge token is required.',
+      });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(loginChallengeToken, JWT_SECRET);
+    } catch {
+      res.status(401).json({
+        success: false,
+        message: 'Invalid or expired login challenge session. Please sign in again.',
+      });
+      return;
+    }
+
+    if (decoded.purpose !== 'LOGIN_OTP' || !decoded.userId) {
+      res.status(401).json({
+        success: false,
+        message: 'Invalid login challenge token.',
+      });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+    });
+
+    if (!user || !user.loginOtpHash) {
+      res.status(400).json({
+        success: false,
+        message: 'Login challenge has expired or was already completed. Please sign in again.',
+      });
+      return;
+    }
+
+    const COOLDOWN_MS = 30 * 1000;
+    if (user.loginLastSentAt) {
+      const elapsed = Date.now() - new Date(user.loginLastSentAt).getTime();
+      if (elapsed < COOLDOWN_MS) {
+        const remainingSeconds = Math.ceil((COOLDOWN_MS - elapsed) / 1000);
+        res.status(429).json({
+          success: false,
+          message: `Please wait ${remainingSeconds} seconds before requesting a new verification code.`,
+          retryAfter: remainingSeconds,
+        });
+        return;
+      }
+    }
+
+    // Generate fresh OTP (invalidating previous OTP)
+    const newOtp = generateSecureOtp();
+    const newHash = hashOtp(newOtp);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        loginOtpHash: newHash,
+        loginOtpExpiresAt: expiresAt,
+        loginOtpAttempts: 0,
+        loginLastSentAt: new Date(),
+      },
+    });
+
+    try {
+      if (user.email) {
+        await sendEmailOtp(user.email, newOtp, 'login');
+      } else if (user.phone) {
+        await sendSmsOtp(user.phone, newOtp, 'login');
+      }
+    } catch (deliveryError) {
+      console.error('[Auth:ResendLoginOtp] Delivery failed:', deliveryError);
+      res.status(502).json({
+        success: false,
+        message: "We couldn't send the verification code. Please try again or contact support.",
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Verification code sent successfully.',
+    });
+  } catch (error) {
+    console.error('[Auth:ResendLoginOtp] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while resending login OTP.',
     });
   }
 }
@@ -271,6 +579,7 @@ async function findUserByIdentifier(identifier: string) {
 
 /**
  * Request a 6-digit OTP for password reset (Supports both Citizen and Authority)
+ * Anti-Enumeration Protection: Always returns the same generic message whether the account exists or not.
  */
 export async function requestPasswordReset(req: Request, res: Response): Promise<void> {
   try {
@@ -289,11 +598,11 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
 
     const user = await findUserByIdentifier(trimmed);
 
-    // Requirement: Never reveal account type, show exact error if not found
+    // Anti-Enumeration Protection: Return same generic response if account not found
     if (!user) {
-      res.status(404).json({
-        success: false,
-        message: 'No account found with this email/mobile number.',
+      res.status(200).json({
+        success: true,
+        message: 'If the account exists, a verification code has been sent.',
       });
       return;
     }
@@ -313,12 +622,12 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
       }
     }
 
-    // Generate secure 6-digit OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+    // Generate cryptographically secure 6-digit OTP and HMAC-SHA256 hash
+    const otp = generateSecureOtp();
+    const otpHash = hashOtp(otp);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Update user record with hashed OTP (NEVER log OTP plaintext in server logs)
+    // Update user record with hashed OTP and reset attempts
     await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -329,7 +638,7 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
       },
     });
 
-    // Send real OTP via SMTP or Twilio SMS (Requirement 1, 2 & 5)
+    // Send real OTP via SMTP or Twilio SMS
     try {
       if (isEmail) {
         await sendEmailOtp(user.email, otp, 'forgot-password');
@@ -349,9 +658,7 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
 
     res.status(200).json({
       success: true,
-      message: isEmail
-        ? `A 6-digit OTP has been sent to ${destination}. It expires in 10 minutes.`
-        : `A 6-digit OTP has been sent via SMS to ${destination}. It expires in 10 minutes.`,
+      message: 'If the account exists, a verification code has been sent.',
       data: {
         destinationType: isEmail ? 'email' : 'phone',
         maskedDestination: destination,
@@ -367,7 +674,8 @@ export async function requestPasswordReset(req: Request, res: Response): Promise
 }
 
 /**
- * Verify 6-digit OTP and return a temporary JWT reset token
+ * Verify 6-digit OTP for password reset and issue a short-lived PASSWORD_RESET challenge token
+ * Uses atomic consumption inside a Prisma transaction.
  */
 export async function verifyResetOtp(req: Request, res: Response): Promise<void> {
   try {
@@ -390,69 +698,96 @@ export async function verifyResetOtp(req: Request, res: Response): Promise<void>
       return;
     }
 
-    const user = await findUserByIdentifier(identifier);
-    if (!user) {
-      res.status(404).json({
-        success: false,
-        message: 'No account found with this email/mobile number.',
-      });
-      return;
-    }
-
-    // Check expiry
-    if (!user.resetOtpHash || !user.resetOtpExpiresAt || new Date() > new Date(user.resetOtpExpiresAt)) {
+    const foundUser = await findUserByIdentifier(identifier);
+    if (!foundUser) {
       res.status(400).json({
         success: false,
-        message: 'OTP has expired or is invalid. Please request a new OTP.',
+        message: 'Invalid or expired verification session. Please request a new OTP.',
       });
       return;
     }
 
-    // Rate-limiting on verification attempts (max 5)
-    if (user.resetOtpAttempts >= 5) {
-      await prisma.user.update({
+    // Atomic OTP verification and consumption
+    const txResult = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({
+        where: { id: foundUser.id },
+      });
+
+      if (!user || !user.resetOtpHash || !user.resetOtpExpiresAt) {
+        return { error: 'Invalid or expired verification session. Please request a new OTP.', status: 400 };
+      }
+
+      if (new Date() > new Date(user.resetOtpExpiresAt)) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { resetOtpHash: null, resetOtpExpiresAt: null },
+        });
+        return { error: 'Verification code has expired. Please request a new OTP.', status: 400 };
+      }
+
+      if (user.resetOtpAttempts >= 5) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { resetOtpHash: null, resetOtpExpiresAt: null },
+        });
+        return {
+          error: 'Too many failed verification attempts. Please request a new OTP.',
+          status: 429,
+        };
+      }
+
+      const isMatch = verifyOtpHash(cleanOtp, user.resetOtpHash);
+      if (!isMatch) {
+        const newAttempts = user.resetOtpAttempts + 1;
+        if (newAttempts >= 5) {
+          await tx.user.update({
+            where: { id: user.id },
+            data: { resetOtpHash: null, resetOtpExpiresAt: null, resetOtpAttempts: newAttempts },
+          });
+          return {
+            error: 'Too many failed verification attempts. Please request a new OTP.',
+            status: 429,
+          };
+        } else {
+          await tx.user.update({
+            where: { id: user.id },
+            data: { resetOtpAttempts: newAttempts },
+          });
+          const remaining = 5 - newAttempts;
+          return {
+            error: `Invalid OTP. You have ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`,
+            status: 400,
+          };
+        }
+      }
+
+      // ATOMIC CONSUMPTION: Clear reset OTP immediately so it can never be replayed
+      await tx.user.update({
         where: { id: user.id },
         data: {
           resetOtpHash: null,
           resetOtpExpiresAt: null,
+          resetOtpAttempts: 0,
         },
       });
-      res.status(429).json({
+
+      return { userId: user.id };
+    });
+
+    if ('error' in txResult) {
+      res.status(txResult.status || 400).json({
         success: false,
-        message: 'Too many failed verification attempts. This OTP has expired. Please request a new one.',
+        message: txResult.error,
       });
       return;
     }
 
-    // Compare SHA-256 hash
-    const inputHash = crypto.createHash('sha256').update(cleanOtp).digest('hex');
-    const isMatch = crypto.timingSafeEqual(
-      Buffer.from(inputHash, 'utf8'),
-      Buffer.from(user.resetOtpHash, 'utf8')
-    );
-
-    if (!isMatch) {
-      const newAttempts = user.resetOtpAttempts + 1;
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { resetOtpAttempts: newAttempts },
-      });
-
-      const remaining = 5 - newAttempts;
-      res.status(400).json({
-        success: false,
-        message: remaining > 0
-          ? `Invalid OTP. You have ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
-          : 'Invalid OTP. Maximum attempts reached; please request a new OTP.',
-      });
-      return;
-    }
-
-    // Issue short-lived reset token (valid for 15 minutes)
-    const resetToken = jwt.sign(
+    // Issue short-lived, purpose-bound PASSWORD_RESET challenge token (15 minutes)
+    const passwordResetToken = jwt.sign(
       {
-        userId: user.id,
+        userId: txResult.userId,
         purpose: 'PASSWORD_RESET',
+        jti: crypto.randomUUID(),
       },
       JWT_SECRET,
       { expiresIn: '15m' }
@@ -461,7 +796,10 @@ export async function verifyResetOtp(req: Request, res: Response): Promise<void>
     res.status(200).json({
       success: true,
       message: 'OTP verified successfully.',
-      data: { resetToken },
+      data: {
+        passwordResetToken,
+        resetToken: passwordResetToken, // backward compatibility
+      },
     });
   } catch (error) {
     console.error('[Auth:VerifyResetOtp] Error:', error);
@@ -473,13 +811,99 @@ export async function verifyResetOtp(req: Request, res: Response): Promise<void>
 }
 
 /**
- * Reset password using the verified reset token
+ * Resend Password Reset OTP with 30-second cooldown
+ */
+export async function resendResetOtp(req: Request, res: Response): Promise<void> {
+  try {
+    const { identifier } = req.body;
+
+    if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
+      res.status(400).json({
+        success: false,
+        message: 'Please enter your registered email or mobile number.',
+      });
+      return;
+    }
+
+    const trimmed = identifier.trim();
+    const isEmail = trimmed.includes('@');
+    const user = await findUserByIdentifier(trimmed);
+
+    // Anti-enumeration protection: return same message if user not found
+    if (!user) {
+      res.status(200).json({
+        success: true,
+        message: 'If the account exists, a verification code has been sent.',
+      });
+      return;
+    }
+
+    const COOLDOWN_MS = 30 * 1000;
+    if (user.lastOtpRequestAt) {
+      const elapsed = Date.now() - new Date(user.lastOtpRequestAt).getTime();
+      if (elapsed < COOLDOWN_MS) {
+        const remaining = Math.ceil((COOLDOWN_MS - elapsed) / 1000);
+        res.status(429).json({
+          success: false,
+          message: `Please wait ${remaining} seconds before requesting a new OTP.`,
+          retryAfter: remaining,
+        });
+        return;
+      }
+    }
+
+    const newOtp = generateSecureOtp();
+    const newHash = hashOtp(newOtp);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        resetOtpHash: newHash,
+        resetOtpExpiresAt: expiresAt,
+        resetOtpAttempts: 0,
+        lastOtpRequestAt: new Date(),
+      },
+    });
+
+    try {
+      if (isEmail) {
+        await sendEmailOtp(user.email, newOtp, 'forgot-password');
+      } else {
+        await sendSmsOtp(user.phone || trimmed, newOtp, 'forgot-password');
+      }
+    } catch (deliveryError) {
+      console.error('[Auth:ResendResetOtp] Delivery failed:', deliveryError);
+      res.status(502).json({
+        success: false,
+        message: "We couldn't send the verification code. Please try again or contact support.",
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'If the account exists, a verification code has been sent.',
+    });
+  } catch (error) {
+    console.error('[Auth:ResendResetOtp] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while resending reset OTP.',
+    });
+  }
+}
+
+/**
+ * Reset password using the verified PASSWORD_RESET challenge token
+ * Enforces production 12+ character password policy with confirmation matching.
  */
 export async function resetPassword(req: Request, res: Response): Promise<void> {
   try {
-    const { resetToken, newPassword, confirmPassword } = req.body;
+    const { passwordResetToken, resetToken, newPassword, confirmPassword } = req.body;
+    const token = passwordResetToken || resetToken;
 
-    if (!resetToken || !newPassword) {
+    if (!token || !newPassword) {
       res.status(400).json({
         success: false,
         message: 'Reset token and new password are required.',
@@ -487,25 +911,19 @@ export async function resetPassword(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+    // Validate strong password policy & confirmation match
+    const validation = validatePasswordConfirmation(newPassword, confirmPassword);
+    if (!validation.isValid) {
       res.status(400).json({
         success: false,
-        message: 'Passwords do not match.',
-      });
-      return;
-    }
-
-    if (newPassword.length < 6) {
-      res.status(400).json({
-        success: false,
-        message: 'Password must be at least 6 characters long.',
+        message: validation.error || 'Password does not meet security requirements.',
       });
       return;
     }
 
     let decoded: any;
     try {
-      decoded = jwt.verify(resetToken, JWT_SECRET);
+      decoded = jwt.verify(token, JWT_SECRET);
     } catch {
       res.status(401).json({
         success: false,
@@ -534,20 +952,11 @@ export async function resetPassword(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Check if reset session was already consumed
-    if (!user.resetOtpHash) {
-      res.status(400).json({
-        success: false,
-        message: 'This reset token has already been used. Please request a new OTP.',
-      });
-      return;
-    }
-
     // Hash password with bcrypt
     const saltRounds = 10;
     const passwordHash = await bcrypt.hash(newPassword, saltRounds);
 
-    // Invalidate OTP and save new password
+    // Update password in database
     await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -555,7 +964,6 @@ export async function resetPassword(req: Request, res: Response): Promise<void> 
         resetOtpHash: null,
         resetOtpExpiresAt: null,
         resetOtpAttempts: 0,
-        lastOtpRequestAt: null,
       },
     });
 
@@ -599,12 +1007,12 @@ function validateEmailFormat(email: string): boolean {
 
 /**
  * Step 1: Start dual OTP signup verification
- * Validates inputs, verifies email & phone are not duplicates, generates dual OTPs,
- * and saves in PendingRegistration table.
+ * Validates inputs against strict 12+ character password policy, verifies non-duplicate email & phone,
+ * generates HMAC-SHA256 hashed dual OTPs, and handles partial delivery rollbacks cleanly.
  */
 export async function startSignup(req: Request, res: Response): Promise<void> {
   try {
-    const { name, email, phone, password, role } = req.body;
+    const { name, email, phone, password, confirmPassword, role } = req.body;
 
     if (!name || typeof name !== 'string' || name.trim().length < 2) {
       res.status(400).json({
@@ -631,10 +1039,12 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    if (!password || password.length < 6) {
+    // Strict 12+ character password validation & confirmation match
+    const passwordValidation = validatePasswordConfirmation(password, confirmPassword);
+    if (!passwordValidation.isValid) {
       res.status(400).json({
         success: false,
-        message: 'Password must be at least 6 characters long.',
+        message: passwordValidation.error || 'Password does not meet security requirements.',
       });
       return;
     }
@@ -642,7 +1052,7 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
     const normalizedEmail = email.toLowerCase().trim();
     const normalizedPhone = phoneValidation.normalized;
 
-    // Requirement 5: Duplicate Prevention - Check email
+    // Duplicate Prevention - Check email
     const existingEmailUser = await prisma.user.findUnique({
       where: { email: normalizedEmail },
     });
@@ -654,7 +1064,7 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    // Requirement 5: Duplicate Prevention - Check mobile number
+    // Duplicate Prevention - Check mobile number
     const last10Digits = normalizedPhone.replace(/\D/g, '').slice(-10);
     const existingPhoneUser = await prisma.user.findFirst({
       where: {
@@ -694,12 +1104,12 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
     }
 
     // Generate separate 6-digit OTPs
-    const emailOtp = crypto.randomInt(100000, 1000000).toString();
-    const phoneOtp = crypto.randomInt(100000, 1000000).toString();
+    const emailOtp = generateSecureOtp();
+    const phoneOtp = generateSecureOtp();
 
-    // Hash both OTPs with SHA-256 (Never log OTPs in plaintext)
-    const emailOtpHash = crypto.createHash('sha256').update(emailOtp).digest('hex');
-    const phoneOtpHash = crypto.createHash('sha256').update(phoneOtp).digest('hex');
+    // Hash both OTPs with HMAC-SHA256 (Never log OTPs in plaintext)
+    const emailOtpHash = hashOtp(emailOtp);
+    const phoneOtpHash = hashOtp(phoneOtp);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Clean up any previous pending records for this email or phone
@@ -727,12 +1137,16 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
       },
     });
 
-    // Send real OTPs via SMTP and Twilio SMS (Requirement 1, 2 & 5)
+    // Send real OTPs via SMTP and Twilio SMS
+    // Partial Delivery Handling: If either channel fails, rollback pending record to prevent invalid state
     try {
       await sendEmailOtp(normalizedEmail, emailOtp, 'signup');
       await sendSmsOtp(normalizedPhone, phoneOtp, 'signup');
     } catch (deliveryError) {
-      console.error('[Auth:StartSignup] Real delivery failed:', deliveryError);
+      console.error('[Auth:StartSignup] Delivery failed:', deliveryError);
+      await prisma.pendingRegistration.deleteMany({
+        where: { id: pending.id },
+      });
       res.status(502).json({
         success: false,
         message: "We couldn't send the verification code. Please try again or contact support.",
@@ -763,6 +1177,7 @@ export async function startSignup(req: Request, res: Response): Promise<void> {
 
 /**
  * Step 2: Verify either Email OTP or Mobile OTP
+ * Uses timing-safe HMAC-SHA256 verification and enforces 5-attempt brute-force protection.
  */
 export async function verifySignupOtp(req: Request, res: Response): Promise<void> {
   try {
@@ -805,8 +1220,6 @@ export async function verifySignupOtp(req: Request, res: Response): Promise<void
       return;
     }
 
-    const inputHash = crypto.createHash('sha256').update(cleanOtp).digest('hex');
-
     if (type === 'email') {
       if (pending.isEmailVerified) {
         res.status(200).json({
@@ -837,10 +1250,7 @@ export async function verifySignupOtp(req: Request, res: Response): Promise<void
         return;
       }
 
-      const isMatch = crypto.timingSafeEqual(
-        Buffer.from(inputHash, 'utf8'),
-        Buffer.from(pending.emailOtpHash, 'utf8')
-      );
+      const isMatch = verifyOtpHash(cleanOtp, pending.emailOtpHash);
 
       if (!isMatch) {
         const newAttempts = pending.emailAttempts + 1;
@@ -905,10 +1315,7 @@ export async function verifySignupOtp(req: Request, res: Response): Promise<void
         return;
       }
 
-      const isMatch = crypto.timingSafeEqual(
-        Buffer.from(inputHash, 'utf8'),
-        Buffer.from(pending.phoneOtpHash, 'utf8')
-      );
+      const isMatch = verifyOtpHash(cleanOtp, pending.phoneOtpHash);
 
       if (!isMatch) {
         const newAttempts = pending.phoneAttempts + 1;
@@ -1002,8 +1409,8 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
         return;
       }
 
-      const newOtp = crypto.randomInt(100000, 1000000).toString();
-      const newHash = crypto.createHash('sha256').update(newOtp).digest('hex');
+      const newOtp = generateSecureOtp();
+      const newHash = hashOtp(newOtp);
 
       await prisma.pendingRegistration.update({
         where: { id: pending.id },
@@ -1016,7 +1423,6 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
         },
       });
 
-      // Send real email OTP via SMTP (Requirement 1 & 5)
       try {
         await sendEmailOtp(pending.email, newOtp, 'signup');
       } catch (deliveryError) {
@@ -1046,8 +1452,8 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
         return;
       }
 
-      const newOtp = crypto.randomInt(100000, 1000000).toString();
-      const newHash = crypto.createHash('sha256').update(newOtp).digest('hex');
+      const newOtp = generateSecureOtp();
+      const newHash = hashOtp(newOtp);
 
       await prisma.pendingRegistration.update({
         where: { id: pending.id },
@@ -1060,7 +1466,6 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
         },
       });
 
-      // Send real mobile OTP via Twilio SMS (Requirement 2 & 5)
       try {
         await sendSmsOtp(pending.phone, newOtp, 'signup');
       } catch (deliveryError) {
@@ -1089,10 +1494,11 @@ export async function resendSignupOtp(req: Request, res: Response): Promise<void
 
 /**
  * Step 4: Complete account creation after both Email and Mobile OTPs are verified
+ * Executes inside an atomic Prisma transaction to prevent concurrent duplicate creation.
  */
 export async function completeSignup(req: Request, res: Response): Promise<void> {
   try {
-    const { sessionId, name, password, role } = req.body;
+    const { sessionId, name, password, confirmPassword, role } = req.body;
 
     if (!sessionId) {
       res.status(400).json({
@@ -1110,95 +1516,102 @@ export async function completeSignup(req: Request, res: Response): Promise<void>
       return;
     }
 
-    if (!password || password.length < 6) {
+    // Re-validate 12+ character password policy
+    const passwordValidation = validatePasswordConfirmation(password, confirmPassword);
+    if (!passwordValidation.isValid) {
       res.status(400).json({
         success: false,
-        message: 'Password must be at least 6 characters long.',
+        message: passwordValidation.error || 'Password does not meet security requirements.',
       });
       return;
     }
 
-    const pending = await prisma.pendingRegistration.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!pending) {
-      res.status(404).json({
-        success: false,
-        message: 'Registration session not found or expired. Please start registration again.',
+    // Execute account creation atomically
+    const txResult = await prisma.$transaction(async (tx) => {
+      const pending = await tx.pendingRegistration.findUnique({
+        where: { id: sessionId },
       });
-      return;
-    }
 
-    // Requirements 3 & 6: User must have verified BOTH email and mobile OTPs
-    if (!pending.isEmailVerified || !pending.isPhoneVerified) {
-      res.status(400).json({
-        success: false,
-        message: 'Both email and mobile number must be verified before account creation.',
-        data: {
-          isEmailVerified: pending.isEmailVerified,
-          isPhoneVerified: pending.isPhoneVerified,
+      if (!pending) {
+        return { error: 'Registration session not found or expired. Please start registration again.', status: 404 };
+      }
+
+      if (!pending.isEmailVerified || !pending.isPhoneVerified) {
+        return {
+          error: 'Both email and mobile number must be verified before account creation.',
+          status: 400,
+          data: {
+            isEmailVerified: pending.isEmailVerified,
+            isPhoneVerified: pending.isPhoneVerified,
+          },
+        };
+      }
+
+      // Check duplicate user during concurrent registration
+      const existingUser = await tx.user.findFirst({
+        where: {
+          OR: [
+            { email: pending.email },
+            { phone: pending.phone },
+          ],
         },
       });
-      return;
-    }
 
-    // Final duplicate checks before writing to users table
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { email: pending.email },
-          { phone: pending.phone },
-        ],
-      },
+      if (existingUser) {
+        return {
+          error: existingUser.email === pending.email
+            ? 'An account with this email address already exists.'
+            : 'An account with this mobile number already exists.',
+          status: 409,
+        };
+      }
+
+      // Hash password with bcrypt
+      const saltRounds = 10;
+      const passwordHash = await bcrypt.hash(password, saltRounds);
+      const userRole: Role = role === 'AUTHORITY' ? 'AUTHORITY' : 'CITIZEN';
+
+      // Create user
+      const createdUser = await tx.user.create({
+        data: {
+          name: name.trim(),
+          email: pending.email,
+          phone: pending.phone,
+          passwordHash,
+          role: userRole,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          createdAt: true,
+        },
+      });
+
+      // Atomically clean up pending registration
+      await tx.pendingRegistration.delete({
+        where: { id: pending.id },
+      });
+
+      return { user: createdUser };
     });
 
-    if (existingUser) {
-      res.status(409).json({
+    if ('error' in txResult) {
+      res.status(txResult.status || 400).json({
         success: false,
-        message: existingUser.email === pending.email
-          ? 'An account with this email address already exists.'
-          : 'An account with this mobile number already exists.',
+        message: txResult.error,
+        ...(txResult.data ? { data: txResult.data } : {}),
       });
       return;
     }
 
-    // Hash password with bcrypt
-    const saltRounds = 10;
-    const passwordHash = await bcrypt.hash(password, saltRounds);
-
-    const userRole: Role = role === 'AUTHORITY' ? 'AUTHORITY' : 'CITIZEN';
-
-    // Create user in database with verified email and mobile number
-    const newUser = await prisma.user.create({
-      data: {
-        name: name.trim(),
-        email: pending.email,
-        phone: pending.phone,
-        passwordHash,
-        role: userRole,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        createdAt: true,
-      },
-    });
-
-    // Clean up pending registration record
-    await prisma.pendingRegistration.delete({
-      where: { id: pending.id },
-    });
-
-    // Requirement 6: Redirect to sign-in with success message
     res.status(201).json({
       success: true,
       message: 'Account created successfully. Please sign in.',
       data: {
-        user: newUser,
+        user: txResult.user,
       },
     });
   } catch (error) {
@@ -1209,5 +1622,6 @@ export async function completeSignup(req: Request, res: Response): Promise<void>
     });
   }
 }
+
 
 

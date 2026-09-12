@@ -6,6 +6,7 @@ import { __testNotificationStore } from '../services/notificationService';
 describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
   const existingUserEmail = 'existing_citizen@example.com';
   const existingUserPhone = '+91 9999988888';
+  const secureTestPassword = 'Nivara@Secure2026';
 
   const newCitizenEmail = 'fresh_citizen_test@example.com';
   const newCitizenPhone = '+91 9888877777';
@@ -52,7 +53,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
     await prisma.$disconnect();
   });
 
-  describe('1. Mobile Format & Duplicate Prevention', () => {
+  describe('1. Mobile Format, Password Policy & Duplicate Prevention', () => {
     it('rejects invalid mobile number format', async () => {
       const res = await request(app)
         .post('/api/auth/signup/start')
@@ -60,12 +61,43 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
           name: 'Test Citizen',
           email: newCitizenEmail,
           phone: '12345',
-          password: 'password123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('Mobile number must be 10 digits');
+    });
+
+    it('rejects weak password failing 12+ char security policy', async () => {
+      const res = await request(app)
+        .post('/api/auth/signup/start')
+        .send({
+          name: 'Weak Password Citizen',
+          email: 'weak_citizen@example.com',
+          phone: '+91 9123412345',
+          password: 'weak',
+          role: 'CITIZEN',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('at least 12 characters');
+    });
+
+    it('rejects password confirmation mismatch', async () => {
+      const res = await request(app)
+        .post('/api/auth/signup/start')
+        .send({
+          name: 'Mismatch Citizen',
+          email: 'mismatch_citizen@example.com',
+          phone: '+91 9123412345',
+          password: secureTestPassword,
+          confirmPassword: 'DifferentPassword@2026',
+          role: 'CITIZEN',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('match');
     });
 
     it('rejects duplicate email address', async () => {
@@ -75,7 +107,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
           name: 'Duplicate Email User',
           email: existingUserEmail,
           phone: '+91 9111122222',
-          password: 'password123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
@@ -90,7 +122,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
           name: 'Duplicate Phone User',
           email: 'unique_email@example.com',
           phone: existingUserPhone,
-          password: 'password123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
@@ -109,7 +141,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
             name: 'Failure Test Citizen',
             email: 'fail_test@example.com',
             phone: '+91 9123412345',
-            password: 'password123',
+            password: secureTestPassword,
             role: 'CITIZEN',
           });
 
@@ -134,7 +166,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
           name: 'Fresh Citizen',
           email: newCitizenEmail,
           phone: newCitizenPhone,
-          password: 'securePassword123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
@@ -144,7 +176,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
       expect(res.body.data.maskedEmail).toContain('@');
       expect(res.body.data.maskedPhone).toContain('7777');
 
-      // Requirement 4: Demo OTP hints removed from client response
+      // Demo OTP hints removed from client response
       expect(res.body.data.devOtpHints).toBeUndefined();
 
       sessionId = res.body.data.sessionId;
@@ -162,7 +194,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         .send({
           sessionId,
           name: 'Fresh Citizen',
-          password: 'securePassword123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
@@ -191,7 +223,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         .send({
           sessionId,
           name: 'Fresh Citizen',
-          password: 'securePassword123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
@@ -221,7 +253,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         .send({
           sessionId,
           name: 'Fresh Citizen',
-          password: 'securePassword123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
@@ -231,16 +263,28 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
       expect(res.body.data.user.email).toBe(newCitizenEmail);
       expect(res.body.data.user.role).toBe('CITIZEN');
 
-      // Verify sign in works with new credentials
+      // Verify two-step sign in works with new credentials
       const loginRes = await request(app)
         .post('/api/auth/login')
         .send({
           email: newCitizenEmail,
-          password: 'securePassword123',
+          password: secureTestPassword,
         });
 
       expect(loginRes.status).toBe(200);
-      expect(loginRes.body.data.token).toBeDefined();
+      expect(loginRes.body.data.requiresOtp).toBe(true);
+      expect(loginRes.body.data.loginChallengeToken).toBeDefined();
+
+      const loginOtp = __testNotificationStore.emails[newCitizenEmail];
+      const verifyRes = await request(app)
+        .post('/api/auth/login/verify-otp')
+        .send({
+          loginChallengeToken: loginRes.body.data.loginChallengeToken,
+          otp: loginOtp,
+        });
+
+      expect(verifyRes.status).toBe(200);
+      expect(verifyRes.body.data.token).toBeDefined();
     });
   });
 
@@ -253,7 +297,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
           name: 'Ward 174 Superintendent',
           email: newAuthorityEmail,
           phone: newAuthorityPhone,
-          password: 'authoritySecret2026',
+          password: 'Authority@Secure2026',
           role: 'AUTHORITY',
         });
 
@@ -286,23 +330,34 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
         .send({
           sessionId,
           name: 'Ward 174 Superintendent',
-          password: 'authoritySecret2026',
+          password: 'Authority@Secure2026',
           role: 'AUTHORITY',
         });
 
       expect(compRes.status).toBe(201);
       expect(compRes.body.data.user.role).toBe('AUTHORITY');
 
-      // 5. Verify sign-in issues token with AUTHORITY role
+      // 5. Verify sign-in flow with AUTHORITY role
       const loginRes = await request(app)
         .post('/api/auth/login')
         .send({
           email: newAuthorityEmail,
-          password: 'authoritySecret2026',
+          password: 'Authority@Secure2026',
         });
 
       expect(loginRes.status).toBe(200);
-      expect(loginRes.body.data.user.role).toBe('AUTHORITY');
+      expect(loginRes.body.data.requiresOtp).toBe(true);
+
+      const loginOtp = __testNotificationStore.emails[newAuthorityEmail];
+      const verifyRes = await request(app)
+        .post('/api/auth/login/verify-otp')
+        .send({
+          loginChallengeToken: loginRes.body.data.loginChallengeToken,
+          otp: loginOtp,
+        });
+
+      expect(verifyRes.status).toBe(200);
+      expect(verifyRes.body.data.user.role).toBe('AUTHORITY');
     });
   });
 
@@ -317,7 +372,7 @@ describe('Auth: Dual OTP Signup Verification (Citizen & Authority)', () => {
           name: 'Cooldown User',
           email: testEmail,
           phone: testPhone,
-          password: 'password123',
+          password: secureTestPassword,
           role: 'CITIZEN',
         });
 
